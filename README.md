@@ -11,8 +11,8 @@ URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pr
 It is a small virtual wind tunnel:
 
 - A **steady current** flows left → right at a fixed speed. It enters through the left edge and leaves through the open right edge. The top and bottom are free-slip walls.
-- The swimmers face **upstream** (head left, tail right) and beat their tails just fast enough to hold position. They are moving solid bodies: every frame, each body's shape and lateral velocity are written into the velocity field (no-slip), then the solver enforces incompressibility.
-- The fluid reacts: boundary layers form on each body and **wake vortices are shed** off the tails and carried downstream. That wake is what the colours show.
+- The swimmers face **upstream** (head left, tail right) and beat their tails just fast enough to hold position. They are moving solid bodies: every frame, each body's shape and lateral velocity are written into the velocity field, then the solver enforces incompressibility.
+- The fluid reacts: **wake vortices are shed** off the tails and carried downstream. That wake is what the colours show.
 - Colour = |vorticity|. Uniform current has zero vorticity, so the left half of the screen is intentionally empty; only disturbances show up.
 
 This is the physics the later RL checkpoints will optimise over: a follower's efficiency depends on the wake of the swimmers ahead of it.
