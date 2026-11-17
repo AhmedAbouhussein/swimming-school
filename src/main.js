@@ -1,5 +1,5 @@
-import { createFluidSolver } from './fluid.js?v=6';
-import { School } from './school.js?v=6';
+import { createFluidSolver } from './fluid.js?v=7';
+import { School } from './school.js?v=7';
 
 function showError(msg) {
   const el = document.createElement('pre');
@@ -10,6 +10,7 @@ function showError(msg) {
 window.addEventListener('error', e => showError(`JS Error: ${e.message}\n${e.filename}:${e.lineno}`));
 window.addEventListener('unhandledrejection', e => showError(`Unhandled: ${e.reason}`));
 
+const params = new URLSearchParams(location.search);
 const container  = document.getElementById('canvas-container');
 const glCanvas   = document.getElementById('gl-canvas');
 const overlay    = document.getElementById('overlay-canvas');
@@ -17,10 +18,11 @@ const slider     = document.getElementById('slider');
 const countLabel = document.getElementById('count');
 const modeBtn    = document.getElementById('mode-btn');
 const effLabel   = document.getElementById('eff');
+const signBtn    = document.getElementById('sign-btn');
 let frameNo = 0;
 
-const params = new URLSearchParams(location.search);
 let darkMode = params.get('mode') !== 'light';
+let signMode = params.get('sign') === '1';
 let gl, fluid, school, ctx2d;
 let lastTime = 0;
 
@@ -51,6 +53,7 @@ function applySize(W, H) {
 }
 
 function applyMode() {
+  signBtn.classList.toggle('on', signMode);
   modeBtn.textContent = darkMode ? '☀ Light' : '☾ Dark';
   document.body.style.background = darkMode ? '#000' : '#fff';
 }
@@ -63,6 +66,7 @@ function build() {
   const { W, H } = computeSize();
   applySize(W, H);
   fluid = createFluidSolver(gl, W, H);
+  fluid.setSign(signMode);
   if (school) school.resize(W, H, flowOf(W));
   else {
     school = new School(W, H, flowOf(W));
@@ -90,6 +94,12 @@ slider.addEventListener('input', () => {
   const n = parseInt(slider.value);
   countLabel.textContent = n;
   school?.setCount(n);
+});
+
+signBtn.addEventListener('click', () => {
+  signMode = !signMode;
+  fluid?.setSign(signMode);
+  signBtn.classList.toggle('on', signMode);
 });
 
 modeBtn.addEventListener('click', () => {

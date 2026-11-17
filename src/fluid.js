@@ -205,7 +205,7 @@ export function createFluidSolver(gl, W, H) {
     return { tex, fbo };
   })();
   const probeOut = new Float32Array(24 * 4);
-  const debugSign = new URLSearchParams(location.search).get('sign') === '1';
+  let debugSign = new URLSearchParams(location.search).get('sign') === '1';
 
   for (const t of [velocity.read, velocity.write]) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
@@ -353,5 +353,5 @@ export function createFluidSolver(gl, W, H) {
     return out;
   }
 
-  return { step, render, probe, inflow: INFLOW, simW, simH };
+  return { step, render, probe, setSign(v) { debugSign = v; }, inflow: INFLOW, simW, simH };
 }

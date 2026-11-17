@@ -3,7 +3,7 @@
 //   front (i, j), sides (i+1, j+1) and (i+1, j-1), back (i+2, j).
 // Diamonds are added as: first one, then to the side (+j), the other side (-j), then behind.
 
-import { Swimmer } from './swimmer.js?v=6';
+import { Swimmer } from './swimmer.js?v=7';
 
 const DX = 0.85;            // stream-wise lattice step, in body lengths
 const DY = 0.42;            // lateral lattice step, in body lengths

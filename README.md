@@ -4,7 +4,7 @@
 
 A browser fluid simulation of a school of slender, tuna-shaped swimmers holding station in a current. WebGL2, all compute on the visitor's GPU: no server, no cost. Hard-reload (Cmd/Ctrl+Shift+R) if the page looks stale.
 
-URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length).
+URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` or the **± Sign** button (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length).
 
 ## Key modelling assumption (read this first)
 
@@ -15,6 +15,7 @@ Consequences:
 - **No body drag.** There is no skin-friction boundary layer along the body, so the simulation says nothing about how much drag a swimmer has. It models thrust and wake interaction only.
 - **Clean thrust wake.** Without a drag boundary layer, the vortices shed from the tail are not hidden, and a solitary swimmer produces a reverse von Kármán street. (`?stamp=full` enforces full no-slip instead, which buries the wake under a drag sheet.)
 - **Same assumption as Lighthill's theory.** This is the same assumption made by Lighthill's elongated-body theory of fish propulsion: a slender body that pushes water sideways, with streamwise friction ignored. That is deliberate, because **efficiency is calculated with Lighthill's theory** (see "Efficiency" below), so the flow model and the efficiency model rest on the same footing.
+- **Full no-slip was tried and rejected.** Stamping x as well (`?stamp=full`) does add an x-force on the body, but at this grid resolution (a body is ~4 cells thick) the numerical drag grows faster than thrust as tail amplitude increases, so net force and a thrust/drag split are not trustworthy and a force-based Froude efficiency could not be resolved. Getting that right would need a much finer body representation; for now efficiency stays Lighthill-based and blind to x-forcing.
 - **Results are only as valid as this assumption.** Conclusions about drag-dependent effects (for example the energetic cost of holding position, or drafting that reduces drag) cannot be drawn from this model.
 
 ## What the flow field is doing
@@ -85,4 +86,4 @@ Two stacked canvases: WebGL for vorticity, 2D canvas for swimmers.
 | `v3.0` | Individual RL: each swimmer optimises its own kinematics |
 | `v4.0` | Group RL: collective efficiency vs individual optimisation, spacing |
 
-Known limits: bodies are held in place (not pushed by the fluid yet); efficiency is a Lighthill-theory estimate, not integrated CFD force; with the open right edge only about three wake wavelengths are visible.
+Known limits: bodies are held in place (not pushed by the fluid yet; RL will add per-swimmer position/heading state and use distance from the assigned lattice position as its reward); efficiency is a Lighthill-theory estimate, not integrated CFD force; with the open right edge only about three wake wavelengths are visible.
