@@ -6,6 +6,17 @@ A browser fluid simulation of a school of slender, tuna-shaped swimmers holding 
 
 URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length).
 
+## Key modelling assumption (read this first)
+
+**The swimmers are only partly "no-slip".** Each body forces the water's *sideways* (y) velocity to match the body's motion, but leaves the *along-stream* (x) velocity alone, so the current slides freely past the body. In other words: no-slip in y, free-slip in x.
+
+Consequences:
+
+- **No body drag.** There is no skin-friction boundary layer along the body, so the simulation says nothing about how much drag a swimmer has. It models thrust and wake interaction only.
+- **Clean thrust wake.** Without a drag boundary layer, the vortices shed from the tail are not hidden, and a solitary swimmer produces a reverse von Kármán street. (`?stamp=full` enforces full no-slip instead, which buries the wake under a drag sheet.)
+- **Same assumption as Lighthill's theory.** This is the same assumption made by Lighthill's elongated-body theory of fish propulsion: a slender body that pushes water sideways, with streamwise friction ignored. That is deliberate, because **efficiency is calculated with Lighthill's theory** (see "Efficiency" below), so the flow model and the efficiency model rest on the same footing.
+- **Results are only as valid as this assumption.** Conclusions about drag-dependent effects (for example the energetic cost of holding position, or drafting that reduces drag) cannot be drawn from this model.
+
 ## What the flow field is doing
 
 It is a small virtual wind tunnel:
@@ -23,7 +34,7 @@ With one swimmer the wake is a **reverse von Kármán street**: two staggered ro
 
 ## Efficiency (live readout)
 
-Each swimmer's Froude efficiency `η = (thrust × U) / (power into the water)` is computed from **Lighthill's elongated-body theory** at the trailing edge, using the swimmer's actual tail velocity and slope and the **flow speed it actually sees**, measured from the fluid 0.25 body lengths ahead of its nose. Thrust and power are averaged over about two tail-beat periods, and the number shown is the simple average of all swimmers. A follower sitting in another swimmer's wake sees a different local flow, so formation changes the number. This is a model estimate from kinematics plus measured flow, not a force integrated over the body in the fluid solver.
+Each swimmer's Froude efficiency `η = (thrust × U) / (power into the water)` is computed from **Lighthill's elongated-body theory** (the same assumption the flow model makes, see above) at the trailing edge, using the swimmer's actual tail velocity and slope and the **flow speed it actually sees**, measured from the fluid 0.25 body lengths ahead of its nose. Thrust and power are averaged over about two tail-beat periods, and the number shown is the simple average of all swimmers. A follower sitting in another swimmer's wake sees a different local flow, so formation changes the number. This is a model estimate from kinematics plus measured flow, not a force integrated over the body in the fluid solver.
 
 ## Formation
 
@@ -46,7 +57,7 @@ Stam stable-fluids on a 288-cell-high grid (aspect-matched, ~512 wide), in GLSL 
 
 1. Semi-Lagrangian advection (stored field = perturbation from the free stream, so half-float precision stays good)
 2. Vorticity confinement
-3. Body stamping: the body's **lateral** velocity is written into the field (the streamwise flow passes freely, as in elongated-body theory). Stamping full no-slip instead gives each body a drag boundary layer that swamps the thrust wake (`?stamp=full` to see it)
+3. Body stamping: only the body's **lateral** velocity is written into the field; streamwise flow passes freely (see the key modelling assumption above)
 4. Divergence → 40 Jacobi pressure iterations (open outlet = pressure 0) → gradient subtraction
 5. Bodies stamped again so the next advection sees them
 
