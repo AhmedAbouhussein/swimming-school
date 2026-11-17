@@ -2,7 +2,7 @@
 // Fish are added in pairs, alternating right/left, building a chain of diamond cells.
 // The lead fish is at the front-center of the right half.
 
-import { Swimmer } from './swimmer.js';
+import { Swimmer } from './swimmer.js?v=3';
 
 // Diamond lattice parameters (in units of swimmer body length)
 const DX = 1.4;  // stream-wise spacing between rows

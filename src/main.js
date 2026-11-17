@@ -1,5 +1,5 @@
-import { createFluidSolver } from './fluid.js';
-import { School } from './school.js';
+import { createFluidSolver } from './fluid.js?v=3';
+import { School } from './school.js?v=3';
 
 // Surface any JS error directly on the page so we can debug without devtools
 function showError(msg) {

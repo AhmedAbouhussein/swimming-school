@@ -4,6 +4,7 @@
 export function createFluidSolver(gl, width, height) {
   const ext = gl.getExtension('EXT_color_buffer_float');
   if (!ext) throw new Error('EXT_color_buffer_float not supported');
+  gl.getExtension('OES_texture_float_linear');
 
   // ── shader sources ────────────────────────────────────────────────────────
 
