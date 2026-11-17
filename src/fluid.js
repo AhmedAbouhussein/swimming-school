@@ -11,6 +11,7 @@ const SIM_H = 288;
 const INFLOW = 40;          // cells/s
 const PRESSURE_ITERS = 40;
 const CONFINEMENT = 6;
+const STAMP_MODE = new URLSearchParams(location.search).get('stamp') || 'lateral';
 
 const VERT = `#version 300 es
 layout(location=0) in vec2 a_pos;
@@ -48,6 +49,16 @@ void main() {
   if (v_uv.x < 2.5 * u_texel.x) r = vec2(0.0);
   if (v_uv.y < u_texel.y || v_uv.y > 1.0 - u_texel.y) r.y = 0.0;
   o = vec4(r, 0.0, 1.0);
+}`;
+
+const PROBE = HEAD + `
+uniform sampler2D u_vel;
+uniform vec2 u_pts[24];
+uniform float u_inflow;
+void main() {
+  vec2 p = u_pts[int(gl_FragCoord.x)];
+  vec2 v = texture(u_vel, p).xy;
+  o = vec4(v.x + u_inflow, v.y, 0.0, 1.0);
 }`;
 
 const CURL = HEAD + `
@@ -119,12 +130,14 @@ void main() {
 
 const DISPLAY = HEAD + `
 uniform sampler2D u_curl;
-uniform float u_dark;
+uniform float u_dark, u_sign;
 void main() {
-  float w = abs(texture(u_curl, v_uv).x);
-  float a = smoothstep(0.9, 7.0, w);
+  float ws = texture(u_curl, v_uv).x;
+  float w = abs(ws);
+  float a = smoothstep(0.6, 3.0, w);
   vec3 bg = mix(vec3(1.0), vec3(0.0), u_dark);
   vec3 ink = mix(vec3(0.95, 0.42, 0.42), vec3(0.18, 0.95, 0.45), u_dark);
+  if (u_sign > 0.5) ink = ws > 0.0 ? vec3(1.0, 0.25, 0.2) : vec3(0.25, 0.55, 1.0);
   o = vec4(mix(bg, ink, a), 1.0);
 }`;
 
@@ -182,6 +195,17 @@ export function createFluidSolver(gl, W, H) {
   const pressure = pair(gl.R32F, gl.RED, gl.NEAREST);
   const divergence = target(gl.R32F, gl.RED, gl.NEAREST);
   const curl = target(gl.R16F, gl.RED, gl.LINEAR);
+  const probeT = (() => {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 24, 1, 0, gl.RGBA, gl.FLOAT, null);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    return { tex, fbo };
+  })();
+  const probeOut = new Float32Array(24 * 4);
+  const debugSign = new URLSearchParams(location.search).get('sign') === '1';
 
   for (const t of [velocity.read, velocity.write]) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
@@ -194,6 +218,7 @@ export function createFluidSolver(gl, W, H) {
 
   const progs = {
     advect: program(VERT, ADVECT),
+    probe: program(VERT, PROBE),
     curl: program(VERT, CURL),
     confine: program(VERT, CONFINE),
     div: program(VERT, DIVERGENCE),
@@ -245,10 +270,12 @@ export function createFluidSolver(gl, W, H) {
     gl.viewport(0, 0, simW, simH);
     gl.bindVertexArray(bodyVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, bodyBuf);
+    if (STAMP_MODE === 'lateral') gl.colorMask(false, true, false, false);
     for (const s of strips) {
       gl.bufferData(gl.ARRAY_BUFFER, s, gl.DYNAMIC_DRAW);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, s.length / 4);
     }
+    gl.colorMask(true, true, true, true);
     gl.bindVertexArray(null);
   }
 
@@ -302,9 +329,29 @@ export function createFluidSolver(gl, W, H) {
     gl.uniform2f(progs.display.loc.u_texel, texel[0], texel[1]);
     bindTex(0, curl.tex, progs.display.loc.u_curl);
     gl.uniform1f(progs.display.loc.u_dark, dark ? 1 : 0);
+    gl.uniform1f(progs.display.loc.u_sign, debugSign ? 1 : 0);
     gl.bindVertexArray(quadVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  return { step, render, inflow: INFLOW, simW, simH };
+  // Total streamwise velocity (cells/s) at points given in canvas pixels.
+  function probe(pts) {
+    const n = Math.min(pts.length, 24);
+    const uv = new Float32Array(48);
+    for (let i = 0; i < n; i++) { uv[2 * i] = pts[i][0] / W; uv[2 * i + 1] = 1 - pts[i][1] / H; }
+    gl.useProgram(progs.probe.p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, probeT.fbo);
+    gl.viewport(0, 0, n, 1);
+    bindTex(0, velocity.read.tex, progs.probe.loc.u_vel);
+    gl.uniform2fv(progs.probe.loc['u_pts[0]'], uv);
+    gl.uniform1f(progs.probe.loc.u_inflow, INFLOW);
+    gl.bindVertexArray(quadVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, probeOut);
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(probeOut[4 * i]);
+    return out;
+  }
+
+  return { step, render, probe, inflow: INFLOW, simW, simH };
 }

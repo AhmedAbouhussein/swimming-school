@@ -4,7 +4,7 @@
 
 A browser fluid simulation of a school of slender, tuna-shaped swimmers holding station in a current. WebGL2, all compute on the visitor's GPU: no server, no cost. Hard-reload (Cmd/Ctrl+Shift+R) if the page looks stale.
 
-URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed).
+URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length).
 
 ## What the flow field is doing
 
@@ -17,6 +17,14 @@ It is a small virtual wind tunnel:
 
 This is the physics the later RL checkpoints will optimise over: a follower's efficiency depends on the wake of the swimmers ahead of it.
 
+### Reverse Kármán street (solitary swimmer)
+
+With one swimmer the wake is a **reverse von Kármán street**: two staggered rows of opposite-sign vortices, counter-clockwise above the centreline and clockwise below, with a jet between them pointing downstream (thrust). Check it with `?n=1&sign=1`. The kinematics sit in the efficient Strouhal band: `St = f·A/U = 1.25 × 0.20 = 0.25` (A = peak-to-peak tail excursion; efficient swimmers sit around 0.2–0.4).
+
+## Efficiency (live readout)
+
+Each swimmer's Froude efficiency `η = (thrust × U) / (power into the water)` is computed from **Lighthill's elongated-body theory** at the trailing edge, using the swimmer's actual tail velocity and slope and the **flow speed it actually sees**, measured from the fluid 0.25 body lengths ahead of its nose. Thrust and power are averaged over about two tail-beat periods, and the number shown is the simple average of all swimmers. A follower sitting in another swimmer's wake sees a different local flow, so formation changes the number. This is a model estimate from kinematics plus measured flow, not a force integrated over the body in the fluid solver.
+
 ## Formation
 
 Swimmers sit on a harlequin (repeating-diamond) lattice. One diamond = front swimmer, two side swimmers, and a back swimmer directly behind the front one (same height, horizontal offset only):
@@ -26,7 +34,7 @@ Swimmers sit on a harlequin (repeating-diamond) lattice. One diamond = front swi
   2 3         (1 front, 2/3 sides, 4 directly behind 1)
 ```
 
-Further diamonds are added in the same order as the first swimmers were: one to the side, the other side, then behind, and so on, sharing vertices with their neighbours (so diamond 2 adds 3 swimmers, etc.). The school lives in the right half of the domain, at constant size until it no longer fits, then shrinks uniformly.
+Further diamonds are added in the same order as the first swimmers were: one to the side, the other side, then behind, and so on, sharing vertices with their neighbours (so diamond 2 adds 3 swimmers, etc.). The school lives in the right half of the domain (its left edge sits at 53% of the width, so small schools leave room for their wake), at constant size until it no longer fits, then shrinks uniformly.
 
 ## Swimmer
 
@@ -38,7 +46,7 @@ Stam stable-fluids on a 288-cell-high grid (aspect-matched, ~512 wide), in GLSL 
 
 1. Semi-Lagrangian advection (stored field = perturbation from the free stream, so half-float precision stays good)
 2. Vorticity confinement
-3. Body stamping (no-slip moving solids)
+3. Body stamping: the body's **lateral** velocity is written into the field (the streamwise flow passes freely, as in elongated-body theory). Stamping full no-slip instead gives each body a drag boundary layer that swamps the thrust wake (`?stamp=full` to see it)
 4. Divergence → 40 Jacobi pressure iterations (open outlet = pressure 0) → gradient subtraction
 5. Bodies stamped again so the next advection sees them
 
@@ -66,4 +74,4 @@ Two stacked canvases: WebGL for vorticity, 2D canvas for swimmers.
 | `v3.0` | Individual RL: each swimmer optimises its own kinematics |
 | `v4.0` | Group RL: collective efficiency vs individual optimisation, spacing |
 
-Known limits: bodies are stamped as stationary (they don't get pushed by the fluid yet); no force/efficiency measurement yet.
+Known limits: bodies are held in place (not pushed by the fluid yet); efficiency is a Lighthill-theory estimate, not integrated CFD force; with the open right edge only about three wake wavelengths are visible.

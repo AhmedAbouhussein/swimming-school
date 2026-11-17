@@ -3,7 +3,7 @@
 
 const WAVELENGTH = 1.0;          // body wavelength, in body lengths
 const AMP_HEAD = 0.02;           // lateral amplitude at the nose (fraction of L)
-const AMP_TAIL = 0.10;           // lateral amplitude at the tail (fraction of L)
+const AMP_TAIL = parseFloat(new URLSearchParams(location.search).get('amp') || '0.10'); // tail amplitude (fraction of L)
 const W_MAX = 0.055;             // max half-thickness (fraction of L)
 const W_END = 0.18;              // half-thickness at the tail end, relative to W_MAX
 const S_MAX = 0.30;              // position of max thickness
@@ -32,6 +32,9 @@ export class Swimmer {
     this.loX = new Float32Array(N_POINTS);
     this.loY = new Float32Array(N_POINTS);
     this.vy = new Float32Array(N_POINTS); // lateral body velocity, canvas px/s (y down)
+    this.tailSlope = 0;                   // dh/dx at the trailing edge
+    this.localU = 0;                      // streamwise flow speed seen by the swimmer, px/s
+    this.tAvg = 0; this.pAvg = 0;         // running mean of thrust*U and power (Lighthill)
   }
 
   update(time, freq) {
@@ -54,6 +57,7 @@ export class Swimmer {
       const nx = -dhds / norm, ny = L / norm;
       const hw = halfThickness(s) * L;
 
+      if (k === this.n - 1) this.tailSlope = dhds / L;
       this.upX[k] = x + nx * hw; this.upY[k] = y + ny * hw;
       this.loX[k] = x - nx * hw; this.loY[k] = y - ny * hw;
     }

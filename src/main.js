@@ -1,5 +1,5 @@
-import { createFluidSolver } from './fluid.js?v=4';
-import { School } from './school.js?v=4';
+import { createFluidSolver } from './fluid.js?v=6';
+import { School } from './school.js?v=6';
 
 function showError(msg) {
   const el = document.createElement('pre');
@@ -16,6 +16,8 @@ const overlay    = document.getElementById('overlay-canvas');
 const slider     = document.getElementById('slider');
 const countLabel = document.getElementById('count');
 const modeBtn    = document.getElementById('mode-btn');
+const effLabel   = document.getElementById('eff');
+let frameNo = 0;
 
 const params = new URLSearchParams(location.search);
 let darkMode = params.get('mode') !== 'light';
@@ -75,10 +77,7 @@ function init() {
   try { build(); } catch (e) { showError(`Fluid solver failed: ${e.message}`); }
   applyMode();
   const warm = parseInt(params.get('warm') || '0');
-  for (let i = 0; i < warm && fluid; i++) {
-    school.update(1 / 60);
-    fluid.step(1 / 60, school.bodyStrips());
-  }
+  for (let i = 0; i < warm && fluid; i++) tick(1 / 60);
 }
 
 let resizeTimer;
@@ -98,6 +97,13 @@ modeBtn.addEventListener('click', () => {
   applyMode();
 });
 
+function tick(dt) {
+  school.update(dt);
+  fluid.step(dt, school.bodyStrips());
+  if (frameNo++ % 4 === 0) school.setLocalFlow(fluid.probe(school.probePoints()));
+  if (frameNo % 10 === 0) effLabel.textContent = Math.round(school.efficiency().mean * 100) + '%';
+}
+
 function frame(ts) {
   requestAnimationFrame(frame);
   if (!fluid || !school || !ctx2d) return;
@@ -106,8 +112,7 @@ function frame(ts) {
   lastTime = ts;
   const W = glCanvas.width, H = glCanvas.height;
 
-  school.update(dt);
-  fluid.step(dt, school.bodyStrips());
+  tick(dt);
   fluid.render(W, H, darkMode);
 
   ctx2d.clearRect(0, 0, W, H);
