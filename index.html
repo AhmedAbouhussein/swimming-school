@@ -6,9 +6,36 @@
   <title>Swimming School</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; overflow: hidden; }
-    #canvas-container { position: relative; }
-    canvas { display: block; }
+
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: sans-serif;
+      overflow: hidden;
+    }
+
+    #canvas-container {
+      position: relative;
+      /* width/height set by JS */
+    }
+
+    #gl-canvas {
+      display: block;
+      position: absolute;
+      top: 0; left: 0;
+    }
+
+    #overlay-canvas {
+      display: block;
+      position: absolute;
+      top: 0; left: 0;
+      pointer-events: none;
+    }
+
     #ui {
       position: absolute;
       bottom: 18px;
@@ -17,20 +44,22 @@
       display: flex;
       align-items: center;
       gap: 14px;
-      background: rgba(0,0,0,0.45);
+      background: rgba(0,0,0,0.5);
       border-radius: 24px;
       padding: 10px 22px;
       backdrop-filter: blur(6px);
       white-space: nowrap;
+      z-index: 10;
     }
+
     #ui label { color: #ccc; font-size: 13px; letter-spacing: 0.04em; }
-    #ui span { color: #fff; font-size: 13px; min-width: 24px; text-align: center; }
+    #ui span   { color: #fff; font-size: 13px; min-width: 24px; text-align: center; }
+
     input[type=range] {
       -webkit-appearance: none;
-      width: 160px;
-      height: 4px;
+      width: 160px; height: 4px;
       border-radius: 2px;
-      background: #444;
+      background: #555;
       outline: none;
     }
     input[type=range]::-webkit-slider-thumb {
@@ -40,6 +69,7 @@
       background: #aaa;
       cursor: pointer;
     }
+
     #mode-btn {
       background: rgba(255,255,255,0.1);
       border: 1px solid rgba(255,255,255,0.2);
@@ -48,14 +78,14 @@
       padding: 5px 12px;
       border-radius: 14px;
       cursor: pointer;
-      letter-spacing: 0.04em;
     }
     #mode-btn:hover { background: rgba(255,255,255,0.18); }
   </style>
 </head>
 <body>
   <div id="canvas-container">
-    <canvas id="c"></canvas>
+    <canvas id="gl-canvas"></canvas>
+    <canvas id="overlay-canvas"></canvas>
     <div id="ui">
       <label>Solitary</label>
       <input type="range" id="slider" min="1" max="20" value="7" />

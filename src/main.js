@@ -1,64 +1,65 @@
 import { createFluidSolver } from './fluid.js';
 import { School } from './school.js';
 
-const canvas = document.getElementById('c');
-const container = document.getElementById('canvas-container');
-const slider = document.getElementById('slider');
-const countLabel = document.getElementById('count');
-const modeBtn = document.getElementById('mode-btn');
+const container   = document.getElementById('canvas-container');
+const glCanvas    = document.getElementById('gl-canvas');
+const overlay     = document.getElementById('overlay-canvas');
+const slider      = document.getElementById('slider');
+const countLabel  = document.getElementById('count');
+const modeBtn     = document.getElementById('mode-btn');
 
 let darkMode = true;
-
-// ── size canvas to viewport (16:9-ish, left half fluid, right half school) ──
-
-function resize() {
-  const W = Math.min(window.innerWidth, window.innerHeight * 1.78);
-  const H = W / 1.78;
-  canvas.width = Math.floor(W);
-  canvas.height = Math.floor(H);
-  canvas.style.width = W + 'px';
-  canvas.style.height = H + 'px';
-}
-resize();
-window.addEventListener('resize', () => { resize(); init(); });
-
-// ── WebGL + 2D canvas overlay ─────────────────────────────────────────────
-
-// We use two canvases: WebGL for fluid, 2D for swimmers on top
-const glCanvas = document.createElement('canvas');
-glCanvas.style.position = 'absolute';
-glCanvas.style.top = '0'; glCanvas.style.left = '0';
-glCanvas.style.width = '100%'; glCanvas.style.height = '100%';
-glCanvas.style.pointerEvents = 'none';
-
-const overlayCanvas = document.createElement('canvas');
-overlayCanvas.style.position = 'absolute';
-overlayCanvas.style.top = '0'; overlayCanvas.style.left = '0';
-overlayCanvas.style.width = '100%'; overlayCanvas.style.height = '100%';
-overlayCanvas.style.pointerEvents = 'none';
-
-// Replace main canvas with layered setup
-canvas.style.display = 'none';
-container.appendChild(glCanvas);
-container.appendChild(overlayCanvas);
-
 let gl, fluid, school, ctx2d;
 let lastTime = 0;
 
+// ── sizing ────────────────────────────────────────────────────────────────
+
+function computeSize() {
+  const maxW = window.innerWidth  - 4;
+  const maxH = window.innerHeight - 4;
+  const aspect = 16 / 9;
+  let W = maxW;
+  let H = W / aspect;
+  if (H > maxH) { H = maxH; W = H * aspect; }
+  return { W: Math.floor(W), H: Math.floor(H) };
+}
+
+function applySize(W, H) {
+  container.style.width  = W + 'px';
+  container.style.height = H + 'px';
+  for (const c of [glCanvas, overlay]) {
+    c.width  = W; c.height = H;
+    c.style.width  = W + 'px';
+    c.style.height = H + 'px';
+  }
+}
+
+// ── init / reinit ─────────────────────────────────────────────────────────
+
 function init() {
-  const W = canvas.width, H = canvas.height;
-  glCanvas.width = W; glCanvas.height = H;
-  overlayCanvas.width = W; overlayCanvas.height = H;
+  const { W, H } = computeSize();
+  applySize(W, H);
 
   gl = glCanvas.getContext('webgl2');
-  if (!gl) { alert('WebGL2 not supported'); return; }
+  if (!gl) {
+    glCanvas.style.background = '#111';
+    glCanvas.getContext('2d')
+      ?.fillText('WebGL2 not supported in this browser', 20, 40);
+    return;
+  }
 
-  fluid = createFluidSolver(gl, W, H);
+  fluid  = createFluidSolver(gl, W, H);
   school = new School(W, H);
   school.setCount(parseInt(slider.value));
-
-  ctx2d = overlayCanvas.getContext('2d');
+  ctx2d  = overlay.getContext('2d');
 }
+
+window.addEventListener('resize', () => {
+  const { W, H } = computeSize();
+  applySize(W, H);
+  if (school) school.resize(W, H);
+  if (fluid)  fluid  = createFluidSolver(gl, W, H);
+});
 
 init();
 
@@ -67,39 +68,34 @@ init();
 slider.addEventListener('input', () => {
   const n = parseInt(slider.value);
   countLabel.textContent = n;
-  school.setCount(n);
+  school?.setCount(n);
 });
 
 modeBtn.addEventListener('click', () => {
   darkMode = !darkMode;
   modeBtn.textContent = darkMode ? '☀ Light' : '☾ Dark';
-  document.body.style.background = darkMode ? '#000' : '#f5f5f0';
+  document.body.style.background = darkMode ? '#000' : '#f0f0eb';
 });
 
 // ── loop ──────────────────────────────────────────────────────────────────
 
 function frame(ts) {
   requestAnimationFrame(frame);
+  if (!fluid || !school || !ctx2d) return;
+
   const dt = Math.min((ts - lastTime) / 1000, 0.033);
   lastTime = ts;
 
-  const W = canvas.width, H = canvas.height;
+  const W = glCanvas.width;
+  const H = glCanvas.height;
 
-  // 1. Inject background flow + swimmer forces into fluid
   school.injectBackgroundFlow(fluid);
   school.injectFluid(fluid);
-
-  // 2. Step fluid solver
   fluid.step(dt);
-
-  // 3. Render fluid to WebGL canvas
   fluid.render(W, H, darkMode);
 
-  // 4. Draw swimmers on 2D overlay
   ctx2d.clearRect(0, 0, W, H);
   school.draw(ctx2d, darkMode);
-
-  // 5. Update swimmer positions
   school.update(dt);
 }
 

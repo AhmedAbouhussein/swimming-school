@@ -50,6 +50,12 @@ export class School {
     return Math.min(maxByH, maxByW, this.canvasH * 0.13);
   }
 
+  resize(w, h) {
+    this.canvasW = w;
+    this.canvasH = h;
+    this.setCount(this.targetN);
+  }
+
   setCount(n) {
     this.targetN = n;
     const bodyLen = this.computeBodyLength(n);
