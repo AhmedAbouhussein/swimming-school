@@ -129,27 +129,31 @@ export function createFluidSolver(gl, width, height) {
 
   const fsDye = `#version 300 es
     precision highp float;
-    uniform sampler2D u_dye;
+    uniform sampler2D u_velocity;
     uniform sampler2D u_vorticity;
     uniform float u_darkMode;
     in vec2 v_uv;
     out vec4 fragColor;
     void main() {
-      float dye = texture(u_dye, v_uv).x;
+      vec2 vel  = texture(u_velocity,  v_uv).xy;
       float vort = texture(u_vorticity, v_uv).x;
-      float v = clamp(vort * 4.0, -1.0, 1.0);
+      float speed = clamp(length(vel) * 60.0, 0.0, 1.0);
+      float v = clamp(vort * 10.0, -1.0, 1.0);
 
       vec3 col;
       if (u_darkMode > 0.5) {
-        // dark: black bg, green vortices
+        // dark mode: deep navy base, speed adds cyan brightness, vorticity adds green/magenta
+        float base = 0.04 + speed * 0.18;
         float pos = max(v, 0.0);
         float neg = max(-v, 0.0);
-        col = vec3(neg * 0.3, pos * 0.9 + neg * 0.4, neg * 0.3);
+        col = vec3(base + neg * 0.5, base + pos * 0.85 + neg * 0.1, base + 0.08);
+        col = clamp(col, 0.0, 1.0);
       } else {
-        // light: white bg, red vortices
+        // light mode: off-white base, vorticity adds red tones
         float pos = max(v, 0.0);
         float neg = max(-v, 0.0);
-        col = vec3(1.0 - neg * 0.0, 1.0 - pos * 0.65 - neg * 0.35, 1.0 - pos * 0.65 - neg * 0.0);
+        col = vec3(1.0 - neg * 0.05, 1.0 - pos * 0.70 - neg * 0.40, 1.0 - pos * 0.70 - neg * 0.05);
+        col = clamp(col, 0.0, 1.0);
       }
       fragColor = vec4(col, 1.0);
     }`;
@@ -339,8 +343,12 @@ export function createFluidSolver(gl, width, height) {
   function render(screenW, screenH, darkMode) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, screenW, screenH);
+    // Clear to base color so canvas is never transparent
+    if (darkMode) gl.clearColor(0.04, 0.04, 0.10, 1.0);
+    else          gl.clearColor(0.94, 0.94, 0.92, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
     useProgram(progDye);
-    setTex(progDye, 'u_dye',       0, velocity.read.tex);
+    setTex(progDye, 'u_velocity',  0, velocity.read.tex);
     setTex(progDye, 'u_vorticity', 1, vorticity.tex);
     gl.uniform1f(gl.getUniformLocation(progDye, 'u_darkMode'), darkMode ? 1.0 : 0.0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);

@@ -1,6 +1,16 @@
 import { createFluidSolver } from './fluid.js';
 import { School } from './school.js';
 
+// Surface any JS error directly on the page so we can debug without devtools
+function showError(msg) {
+  const el = document.createElement('pre');
+  el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#c00;color:#fff;padding:12px;z-index:999;font-size:13px;white-space:pre-wrap;';
+  el.textContent = msg;
+  document.body.appendChild(el);
+}
+window.addEventListener('error', e => showError(`JS Error: ${e.message}\n${e.filename}:${e.lineno}`));
+window.addEventListener('unhandledrejection', e => showError(`Unhandled: ${e.reason}`));
+
 const container   = document.getElementById('canvas-container');
 const glCanvas    = document.getElementById('gl-canvas');
 const overlay     = document.getElementById('overlay-canvas');
@@ -48,7 +58,12 @@ function init() {
     return;
   }
 
-  fluid  = createFluidSolver(gl, W, H);
+  try {
+    fluid = createFluidSolver(gl, W, H);
+  } catch(e) {
+    showError(`WebGL fluid solver failed: ${e.message}`);
+    return;
+  }
   school = new School(W, H);
   school.setCount(parseInt(slider.value));
   ctx2d  = overlay.getContext('2d');
