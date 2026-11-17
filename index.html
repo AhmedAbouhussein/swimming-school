@@ -70,7 +70,7 @@
       cursor: pointer;
     }
 
-    #sign-btn, #mode-btn {
+    #sign-btn, #hold-btn, #mode-btn {
       background: rgba(255,255,255,0.1);
       border: 1px solid rgba(255,255,255,0.2);
       color: #ccc;
@@ -79,14 +79,25 @@
       border-radius: 14px;
       cursor: pointer;
     }
-    #sign-btn:hover, #mode-btn:hover { background: rgba(255,255,255,0.18); }
-    #sign-btn.on { background: rgba(255,255,255,0.3); color: #fff; }
+    #sign-btn:hover, #hold-btn:hover, #mode-btn:hover { background: rgba(255,255,255,0.18); }
+    #sign-btn.on, #hold-btn.on { background: rgba(255,255,255,0.3); color: #fff; }
+    #debug {
+      position: absolute; top: 8px; left: 8px; z-index: 10;
+      color: #9f9; font: 11px/1.3 monospace; background: rgba(0,0,0,0.6);
+      padding: 6px 10px; border-radius: 6px; pointer-events: none; white-space: pre;
+    }
+    #hint {
+      position: absolute; top: 10px; right: 14px; z-index: 10;
+      color: rgba(128,128,128,0.9); font-size: 12px; pointer-events: none;
+    }
   </style>
 </head>
 <body>
   <div id="canvas-container">
     <canvas id="gl-canvas"></canvas>
     <canvas id="overlay-canvas"></canvas>
+    <pre id="debug" hidden></pre>
+    <div id="hint">click the water to push the swimmers</div>
     <div id="ui">
       <label>Solitary</label>
       <input type="range" id="slider" min="1" max="20" value="7" />
@@ -94,10 +105,13 @@
       <span id="count">7</span>
       <label>Efficiency</label>
       <span id="eff" style="min-width:40px">–</span>
+      <label>Offset</label>
+      <span id="err" style="min-width:40px">–</span>
+      <button id="hold-btn" class="on" title="Baseline controller that returns swimmers to their slot">Hold</button>
       <button id="sign-btn" title="Colour vortices by rotation direction">± Sign</button>
       <button id="mode-btn">☀ Light</button>
     </div>
   </div>
-  <script type="module" src="src/main.js?v=7"></script>
+  <script type="module" src="src/main.js?v=8"></script>
 </body>
 </html>

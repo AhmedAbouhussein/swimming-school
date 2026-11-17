@@ -3,13 +3,17 @@
 //   front (i, j), sides (i+1, j+1) and (i+1, j-1), back (i+2, j).
 // Diamonds are added as: first one, then to the side (+j), the other side (-j), then behind.
 
-import { Swimmer } from './swimmer.js?v=7';
+import { Swimmer, meanTailThrust } from './swimmer.js?v=8';
 
 const DX = 0.85;            // stream-wise lattice step, in body lengths
 const DY = 0.42;            // lateral lattice step, in body lengths
 const MAX_LENGTH_FRAC = 0.26; // body length as a fraction of canvas height, before shrinking
 const STROUHAL_K = parseFloat(new URLSearchParams(location.search).get('k') || '1.25'); // f = K * U / L
 const PAD_CELLS = 1.0;      // fluid footprint is the drawn body dilated by this many sim cells
+const PSI_MAX = 0.6;        // largest heading command, rad
+export const CTRL = { kp: 1.5, kd: 4, ki: 0.4, kpy: 1.2, kdy: 1.5, boost: 1.0, iMax: 0.4 };
+const PUSH_SPEED = 0.5;     // click / URL push kick, in free-stream speeds
+const PUSH_RADIUS = 2.5;    // click push reach, in body lengths
 
 export function formationLattice(n) {
   const R = 5;
@@ -41,6 +45,8 @@ export class School {
     this.time = 0;
     this.freq = 1;
     this.swimmers = [];
+    this.hold = true;
+    this.rings = [];
     this.setCount(this.count);
   }
 
@@ -68,23 +74,75 @@ export class School {
     this.freq = STROUHAL_K * this.flow.inflow / (L * this.flow.cellsPerPx);
     this.swimmers = lattice.map(p =>
       new Swimmer(left + (p.i - iMin) * DX * L, cy - (p.j - jMid) * DY * L, L, 0));
-    this.swimmers.forEach(s => { s.localU = this.flow.inflow / this.flow.cellsPerPx; s.update(this.time, this.freq); });
+    this.U0 = this.flow.inflow / this.flow.cellsPerPx;
+    this.k0 = meanTailThrust(L, this.freq, this.U0) / (this.U0 * this.U0); // thrust balances drag at U0
+    this.swimmers.forEach(s => { s.localU = this.U0; s.update(0, this.freq); });
   }
 
   update(dt) {
     this.time += dt;
-    const tau = 2 / this.freq;
-    const a = Math.min(1, dt / tau);
     this.swimmers.forEach(s => {
-      s.update(this.time, this.freq);
-      // Lighthill elongated-body theory at the trailing edge (per unit virtual mass)
+      this.control(s, dt);
+      const f = this.freq * s.ctrl.f;
+      s.update(dt, f);
+      // Lighthill elongated-body theory at the trailing edge (per unit virtual mass),
+      // using the water speed relative to the swimmer.
+      const ur = s.localU - s.vxb;
       const hd = s.vy[s.n - 1];
-      const w = hd + s.localU * s.tailSlope;
+      const w = hd + ur * s.tailSlope;
       const thrust = hd * w - 0.5 * w * w;
-      const power = s.localU * hd * w;
-      s.tAvg += (thrust * s.localU - s.tAvg) * a;
+      const power = ur * hd * w;
+      const a = Math.min(1, dt * f / 2);
+      s.tAvg += (thrust * ur - s.tAvg) * a;
       s.pAvg += (power - s.pAvg) * a;
+      s.tForce += (thrust - s.tForce) * Math.min(1, dt * f);
+      s.advance(dt, this.k0);
+      this.clamp(s);
     });
+    this.rings.forEach(r => { r.age += dt; });
+    this.rings = this.rings.filter(r => r.age < 0.7);
+  }
+
+  // Baseline PID hold-station controller: beat frequency for x, heading for y.
+  control(s, dt) {
+    const c = s.ctrl;
+    if (!this.hold) { c.f = 1; c.a = 1; c.psi = 0; s.ix = 0; return; }
+    const L = s.length;
+    s.ix = Math.max(-CTRL.iMax, Math.min(CTRL.iMax, s.ix + s.dx / L * dt));
+    const u = CTRL.kp * s.dx / L + CTRL.kd * s.vxb / this.U0 + CTRL.ki * s.ix;
+    const psi = -(CTRL.kpy * s.dy / L + CTRL.kdy * s.vyb / this.U0);
+    c.psi = Math.max(-PSI_MAX, Math.min(PSI_MAX, psi));
+    c.f = Math.max(0.4, Math.min(1.8, 1 + u + CTRL.boost * Math.abs(c.psi)));
+  }
+
+  clamp(s) {
+    const L = s.length;
+    const minX = this.W * 0.08 - s.homeX, maxX = this.W * 0.97 - L - s.homeX;
+    const minY = this.H * 0.06 - s.homeY, maxY = this.H * 0.80 - s.homeY;
+    if (s.dx < minX || s.dx > maxX) { s.dx = Math.max(minX, Math.min(maxX, s.dx)); s.vxb = 0; }
+    if (s.dy < minY || s.dy > maxY) { s.dy = Math.max(minY, Math.min(maxY, s.dy)); s.vyb = 0; }
+  }
+
+  // Velocity kick (in free-stream speeds) applied to every swimmer.
+  pushAll(ux, uy) {
+    this.swimmers.forEach(s => { s.vxb += ux * this.U0; s.vyb += uy * this.U0; });
+  }
+
+  // Click push: kick swimmers within reach, directed away from the click.
+  pushAt(x, y) {
+    this.rings.push({ x, y, age: 0 });
+    this.swimmers.forEach(s => {
+      const cx = (s.upX[20] + s.loX[20]) / 2, cy = (s.upY[20] + s.loY[20]) / 2;
+      const d = Math.hypot(cx - x, cy - y), reach = PUSH_RADIUS * s.length;
+      if (d > reach) return;
+      const k = PUSH_SPEED * this.U0 * (1 - d / reach) / (d || 1);
+      s.vxb += (cx - x) * k; s.vyb += (cy - y) * k;
+    });
+  }
+
+  // Mean distance from home slot, in body lengths.
+  offset() {
+    return this.swimmers.reduce((a, s) => a + Math.hypot(s.dx, s.dy) / s.length, 0) / this.swimmers.length;
   }
 
   // Froude efficiency of each swimmer, and the school average.
@@ -94,7 +152,7 @@ export class School {
   }
 
   probePoints() {
-    return this.swimmers.map(s => [s.noseX - 0.25 * s.length, s.y]);
+    return this.swimmers.map(s => [s.noseX - 0.25 * s.length, s.noseY]);
   }
 
   setLocalFlow(cellsPerS) {
@@ -114,7 +172,7 @@ export class School {
       const d = new Float32Array(s.n * 2 * 4);
       let o = 0;
       for (let k = 0; k < s.n; k++) {
-        const vy = -s.vy[k] * cells;
+        const vy = -s.vyField[k] * cells;
         const dx = s.upX[k] - s.loX[k], dy = s.upY[k] - s.loY[k];
         const m = pad / (Math.hypot(dx, dy) || 1);
         d[o++] = (s.upX[k] + dx * m) * sx - 1; d[o++] = 1 - (s.upY[k] + dy * m) * sy; d[o++] = 0; d[o++] = vy;
@@ -127,5 +185,12 @@ export class School {
   draw(ctx, darkMode) {
     const fill = darkMode ? '#3A6EA5' : '#14141f';
     this.swimmers.forEach(s => s.draw(ctx, fill));
+    this.rings.forEach(r => {
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, 10 + r.age * 160, 0, 2 * Math.PI);
+      ctx.strokeStyle = darkMode ? `rgba(255,255,255,${0.7 * (1 - r.age / 0.7)})` : `rgba(0,0,0,${0.6 * (1 - r.age / 0.7)})`;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    });
   }
 }

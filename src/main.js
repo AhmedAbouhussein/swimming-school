@@ -1,5 +1,5 @@
-import { createFluidSolver } from './fluid.js?v=7';
-import { School } from './school.js?v=7';
+import { createFluidSolver } from './fluid.js?v=8';
+import { School } from './school.js?v=8';
 
 function showError(msg) {
   const el = document.createElement('pre');
@@ -19,10 +19,20 @@ const countLabel = document.getElementById('count');
 const modeBtn    = document.getElementById('mode-btn');
 const effLabel   = document.getElementById('eff');
 const signBtn    = document.getElementById('sign-btn');
+const holdBtn    = document.getElementById('hold-btn');
+const errLabel   = document.getElementById('err');
+const debugEl    = document.getElementById('debug');
 let frameNo = 0;
 
 let darkMode = params.get('mode') !== 'light';
 let signMode = params.get('sign') === '1';
+let hold = params.get('hold') !== '0';
+const pushDirs = { upstream: [-1, 0], downstream: [1, 0], up: [0, -1], down: [0, 1] };
+const pushDir = pushDirs[params.get('push')];
+const pushAt = parseFloat(params.get('pushAt') || '6');
+let pushed = false;
+const log = [];
+if (params.get('debug')) debugEl.hidden = false;
 let gl, fluid, school, ctx2d;
 let lastTime = 0;
 
@@ -52,6 +62,11 @@ function applySize(W, H) {
   }
 }
 
+function applyHold() {
+  school.hold = hold;
+  holdBtn.classList.toggle('on', hold);
+}
+
 function applyMode() {
   signBtn.classList.toggle('on', signMode);
   modeBtn.textContent = darkMode ? '☀ Light' : '☾ Dark';
@@ -72,6 +87,7 @@ function build() {
     school = new School(W, H, flowOf(W));
     school.setCount(parseInt(slider.value));
   }
+  school.hold = hold;
 }
 
 function init() {
@@ -80,6 +96,7 @@ function init() {
   ctx2d = overlay.getContext('2d');
   try { build(); } catch (e) { showError(`Fluid solver failed: ${e.message}`); }
   applyMode();
+  applyHold();
   const warm = parseInt(params.get('warm') || '0');
   for (let i = 0; i < warm && fluid; i++) tick(1 / 60);
 }
@@ -102,16 +119,38 @@ signBtn.addEventListener('click', () => {
   signBtn.classList.toggle('on', signMode);
 });
 
+holdBtn.addEventListener('click', () => {
+  hold = !hold;
+  applyHold();
+});
+
+container.addEventListener('click', e => {
+  if (!school || e.target.closest('#ui')) return;
+  const r = container.getBoundingClientRect();
+  school.pushAt(e.clientX - r.left, e.clientY - r.top);
+});
+
 modeBtn.addEventListener('click', () => {
   darkMode = !darkMode;
   applyMode();
 });
 
 function tick(dt) {
+  if (pushDir && !pushed && school.time >= pushAt) { pushed = true; school.pushAll(pushDir[0] * 0.5, pushDir[1] * 0.5); }
   school.update(dt);
   fluid.step(dt, school.bodyStrips());
   if (frameNo++ % 4 === 0) school.setLocalFlow(fluid.probe(school.probePoints()));
-  if (frameNo % 10 === 0) effLabel.textContent = Math.round(school.efficiency().mean * 100) + '%';
+  if (frameNo % 10 === 0) {
+    const eff = school.efficiency().mean, off = school.offset();
+    effLabel.textContent = Math.round(eff * 100) + '%';
+    errLabel.textContent = off.toFixed(2) + ' L';
+    if (!debugEl.hidden && frameNo % 30 === 0) {
+      const s = school.swimmers[0], L = s.length;
+      log.push(`t=${school.time.toFixed(1).padStart(5)} dx=${(s.dx / L).toFixed(2)} dy=${(s.dy / L).toFixed(2)} psi=${s.psi.toFixed(2)} f=${s.ctrl.f.toFixed(2)} eta=${Math.round(eff * 100)}% off=${off.toFixed(2)}`);
+      if (log.length > 40) log.shift();
+      debugEl.textContent = log.join('\n');
+    }
+  }
 }
 
 function frame(ts) {

@@ -4,7 +4,7 @@
 
 A browser fluid simulation of a school of slender, tuna-shaped swimmers holding station in a current. WebGL2, all compute on the visitor's GPU: no server, no cost. Hard-reload (Cmd/Ctrl+Shift+R) if the page looks stale.
 
-URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` or the **± Sign** button (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length).
+URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` or the **± Sign** button (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length), `?hold=0` (controller off), `?push=upstream|downstream|up|down&pushAt=6` (kick every swimmer at that sim time), `?debug=1` (log of swimmer 0's offset, heading, beat-frequency scale, efficiency).
 
 ## Key modelling assumption (read this first)
 
@@ -36,6 +36,21 @@ With one swimmer the wake is a **reverse von Kármán street**: two staggered ro
 ## Efficiency (live readout)
 
 Each swimmer's Froude efficiency `η = (thrust × U) / (power into the water)` is computed from **Lighthill's elongated-body theory** (the same assumption the flow model makes, see above) at the trailing edge, using the swimmer's actual tail velocity and slope and the **flow speed it actually sees**, measured from the fluid 0.25 body lengths ahead of its nose. Thrust and power are averaged over about two tail-beat periods, and the number shown is the simple average of all swimmers. A follower sitting in another swimmer's wake sees a different local flow, so formation changes the number. This is a model estimate from kinematics plus measured flow, not a force integrated over the body in the fluid solver.
+
+## Swimmer state and formula forces (unpinned swimmers)
+
+Swimmers are no longer nailed to their slot. Each has a rigid-body **state** (offset from its home lattice slot, velocity, heading) that is advanced every frame from **formula forces**: closed-form expressions, not forces integrated from the fluid solver (that was tried, see above, and the grid is too coarse to resolve it).
+
+- **Thrust**: Lighthill's trailing-edge thrust per unit virtual mass, `½ḣ² − ½U_rel²·slope²` (time-averaged over a beat), along the body's heading.
+- **Drag**: `k·|u|·u` on the water velocity relative to the body, resolved along and across the body (cross-flow drag is 14× the axial one, so sideways motion is heavily damped). `k` is calibrated once so thrust exactly balances drag at the free-stream speed with the default kinematics.
+- **Water speed** `U_rel = local flow − swimmer velocity`, where the local flow is probed from the fluid 0.25 L ahead of the nose. This is how the fluid enters the dynamics: a follower in a wake feels a different drag and thrust.
+- **Heading** follows a command like a damped spring (about a 1.5 s response); the body rotates about 35% of its length from the nose.
+- **Back into the fluid**: the body's lateral motion (wave + rigid sway + rotation) is stamped into the water as before, so a moving swimmer still sheds a wake. Streamwise motion does not push water (the key modelling assumption above).
+- **Efficiency** is still Lighthill, but now uses the swimmer's actual `U_rel` and kinematics, so it changes when a swimmer beats harder, coasts, or sits in a wake. At very low beat frequency thrust goes negative and the readout clamps to 0%.
+
+### Baseline controller and push
+
+A hand-tuned PID keeps each swimmer in its slot: beat-frequency scale for the streamwise error, heading command for the sideways error (the "Hold" button turns it off, so swimmers drift). **Click the water** to push swimmers away from the click (a velocity kick, not a stamped ball), or use `?push=`. Typical recovery is about 10 s; the "Offset" readout is the mean distance from slot in body lengths, and efficiency dips while swimmers coast or sprint back. This controller is the benchmark the RL policies will have to beat; those actions will be beat-frequency scale, amplitude scale and heading command, with reward based on distance from slot (plus efficiency).
 
 ## Formation
 
@@ -81,9 +96,9 @@ Two stacked canvases: WebGL for vorticity, 2D canvas for swimmers.
 
 | Tag | Checkpoint |
 |-----|-----------|
-| `v1.x` ← *current* | Real fluid, fixed kinematics, fixed diamond formation |
-| `v2.0` | Swimmers respond to upstream vortices (two-way coupling) |
+| `v1.x` | Real fluid, fixed kinematics, fixed diamond formation |
+| `v2.0` ← *current* | Unpinned swimmers: state, formula forces, baseline hold-station controller, push |
 | `v3.0` | Individual RL: each swimmer optimises its own kinematics |
 | `v4.0` | Group RL: collective efficiency vs individual optimisation, spacing |
 
-Known limits: bodies are held in place (not pushed by the fluid yet; RL will add per-swimmer position/heading state and use distance from the assigned lattice position as its reward); efficiency is a Lighthill-theory estimate, not integrated CFD force; with the open right edge only about three wake wavelengths are visible.
+Known limits: the water pushes swimmers only through the probed flow speed (no pressure force on the body, no sideways flow component in the drag); controller gains and the mass/drag constants are tuned for plausible behaviour, not calibrated to real tuna; efficiency is a Lighthill-theory estimate, not integrated CFD force; with the open right edge only about three wake wavelengths are visible.
