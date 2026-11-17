@@ -1,359 +1,310 @@
-// 2D Navier-Stokes fluid solver on WebGL2 textures.
-// Ping-pong FBOs for velocity, pressure, dye.
+// Stable-fluids (Stam) solver in WebGL2, set up as a wind tunnel:
+//   - a steady current U enters at the left edge and leaves through the open right edge,
+//   - top/bottom are free-slip walls,
+//   - swimmers are moving solid bodies stamped into the velocity field (no-slip), so they
+//     shed real wake vortices into the current.
+// Units: velocity in sim cells/s, time in seconds.
+// The stored field is the perturbation from the free stream (u - U), which keeps half-float precision
+// meaningful; the uniform U is added back when advecting.
 
-export function createFluidSolver(gl, width, height) {
-  const ext = gl.getExtension('EXT_color_buffer_float');
-  if (!ext) throw new Error('EXT_color_buffer_float not supported');
-  gl.getExtension('OES_texture_float_linear');
+const SIM_H = 288;
+const INFLOW = 40;          // cells/s
+const PRESSURE_ITERS = 40;
+const CONFINEMENT = 6;
 
-  // ── shader sources ────────────────────────────────────────────────────────
+const VERT = `#version 300 es
+layout(location=0) in vec2 a_pos;
+out vec2 v_uv;
+void main() { v_uv = a_pos * 0.5 + 0.5; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
 
-  const vsQuad = `#version 300 es
-    in vec2 a_pos;
-    out vec2 v_uv;
-    void main() {
-      v_uv = a_pos * 0.5 + 0.5;
-      gl_Position = vec4(a_pos, 0.0, 1.0);
-    }`;
+const BODY_VERT = `#version 300 es
+layout(location=0) in vec2 a_pos;
+layout(location=1) in vec2 a_vel;
+out vec2 v_vel;
+void main() { v_vel = a_vel; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
 
-  const fsAdvect = `#version 300 es
-    precision highp float;
-    uniform sampler2D u_velocity;
-    uniform sampler2D u_source;
-    uniform float u_dt;
-    uniform vec2 u_texel;
-    in vec2 v_uv;
-    out vec4 fragColor;
-    void main() {
-      vec2 vel = texture(u_velocity, v_uv).xy;
-      vec2 prev = v_uv - vel * u_dt * u_texel;
-      fragColor = texture(u_source, prev);
-    }`;
+const HEAD = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 v_uv;
+out vec4 o;
+uniform vec2 u_texel;
+`;
 
-  const fsDivergence = `#version 300 es
-    precision highp float;
-    uniform sampler2D u_velocity;
-    uniform vec2 u_texel;
-    in vec2 v_uv;
-    out vec4 fragColor;
-    void main() {
-      float l = texture(u_velocity, v_uv - vec2(u_texel.x, 0.0)).x;
-      float r = texture(u_velocity, v_uv + vec2(u_texel.x, 0.0)).x;
-      float b = texture(u_velocity, v_uv - vec2(0.0, u_texel.y)).y;
-      float t = texture(u_velocity, v_uv + vec2(0.0, u_texel.y)).y;
-      fragColor = vec4((r - l + t - b) * 0.5, 0.0, 0.0, 1.0);
-    }`;
+const BODY_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_vel;
+uniform float u_inflow;
+out vec4 o;
+void main() { o = vec4(v_vel - vec2(u_inflow, 0.0), 0.0, 1.0); }`;
 
-  const fsPressure = `#version 300 es
-    precision highp float;
-    uniform sampler2D u_pressure;
-    uniform sampler2D u_divergence;
-    uniform vec2 u_texel;
-    in vec2 v_uv;
-    out vec4 fragColor;
-    void main() {
-      float l = texture(u_pressure, v_uv - vec2(u_texel.x, 0.0)).x;
-      float r = texture(u_pressure, v_uv + vec2(u_texel.x, 0.0)).x;
-      float b = texture(u_pressure, v_uv - vec2(0.0, u_texel.y)).x;
-      float t = texture(u_pressure, v_uv + vec2(0.0, u_texel.y)).x;
-      float div = texture(u_divergence, v_uv).x;
-      fragColor = vec4((l + r + b + t - div) * 0.25, 0.0, 0.0, 1.0);
-    }`;
+const ADVECT = HEAD + `
+uniform sampler2D u_vel;
+uniform float u_dt, u_inflow;
+void main() {
+  vec2 vel = texture(u_vel, v_uv).xy + vec2(u_inflow, 0.0);
+  vec2 prev = v_uv - vel * u_dt * u_texel;
+  vec2 r = texture(u_vel, prev).xy;
+  if (v_uv.x < 2.5 * u_texel.x) r = vec2(0.0);
+  if (v_uv.y < u_texel.y || v_uv.y > 1.0 - u_texel.y) r.y = 0.0;
+  o = vec4(r, 0.0, 1.0);
+}`;
 
-  const fsSubtract = `#version 300 es
-    precision highp float;
-    uniform sampler2D u_velocity;
-    uniform sampler2D u_pressure;
-    uniform vec2 u_texel;
-    in vec2 v_uv;
-    out vec4 fragColor;
-    void main() {
-      float l = texture(u_pressure, v_uv - vec2(u_texel.x, 0.0)).x;
-      float r = texture(u_pressure, v_uv + vec2(u_texel.x, 0.0)).x;
-      float b = texture(u_pressure, v_uv - vec2(0.0, u_texel.y)).x;
-      float t = texture(u_pressure, v_uv + vec2(0.0, u_texel.y)).x;
-      vec2 vel = texture(u_velocity, v_uv).xy;
-      vel -= vec2(r - l, t - b) * 0.5;
-      fragColor = vec4(vel, 0.0, 1.0);
-    }`;
+const CURL = HEAD + `
+uniform sampler2D u_vel;
+void main() {
+  float l = texture(u_vel, v_uv - vec2(u_texel.x, 0.0)).y;
+  float r = texture(u_vel, v_uv + vec2(u_texel.x, 0.0)).y;
+  float t = texture(u_vel, v_uv + vec2(0.0, u_texel.y)).x;
+  float b = texture(u_vel, v_uv - vec2(0.0, u_texel.y)).x;
+  o = vec4(0.5 * ((r - l) - (t - b)), 0.0, 0.0, 1.0);
+}`;
 
-  const fsVorticity = `#version 300 es
-    precision highp float;
-    uniform sampler2D u_velocity;
-    uniform vec2 u_texel;
-    in vec2 v_uv;
-    out vec4 fragColor;
-    void main() {
-      float l = texture(u_velocity, v_uv - vec2(u_texel.x, 0.0)).y;
-      float r = texture(u_velocity, v_uv + vec2(u_texel.x, 0.0)).y;
-      float b = texture(u_velocity, v_uv - vec2(0.0, u_texel.y)).x;
-      float t = texture(u_velocity, v_uv + vec2(0.0, u_texel.y)).x;
-      fragColor = vec4((r - l - t + b) * 0.5, 0.0, 0.0, 1.0);
-    }`;
+const CONFINE = HEAD + `
+uniform sampler2D u_vel, u_curl;
+uniform float u_dt, u_eps;
+void main() {
+  float l = texture(u_curl, v_uv - vec2(u_texel.x, 0.0)).x;
+  float r = texture(u_curl, v_uv + vec2(u_texel.x, 0.0)).x;
+  float t = texture(u_curl, v_uv + vec2(0.0, u_texel.y)).x;
+  float b = texture(u_curl, v_uv - vec2(0.0, u_texel.y)).x;
+  float c = texture(u_curl, v_uv).x;
+  vec2 g = 0.5 * vec2(abs(r) - abs(l), abs(t) - abs(b));
+  vec2 n = g / (length(g) + 1e-5);
+  vec2 f = u_eps * vec2(n.y, -n.x) * c;
+  if (v_uv.x < 6.0 * u_texel.x) f = vec2(0.0);
+  vec2 v = texture(u_vel, v_uv).xy + u_dt * f;
+  o = vec4(v, 0.0, 1.0);
+}`;
 
-  const fsVortForce = `#version 300 es
-    precision highp float;
-    uniform sampler2D u_velocity;
-    uniform sampler2D u_vorticity;
-    uniform vec2 u_texel;
-    uniform float u_curl;
-    uniform float u_dt;
-    in vec2 v_uv;
-    out vec4 fragColor;
-    void main() {
-      float l = abs(texture(u_vorticity, v_uv - vec2(u_texel.x, 0.0)).x);
-      float r = abs(texture(u_vorticity, v_uv + vec2(u_texel.x, 0.0)).x);
-      float b = abs(texture(u_vorticity, v_uv - vec2(0.0, u_texel.y)).x);
-      float t = abs(texture(u_vorticity, v_uv + vec2(0.0, u_texel.y)).x);
-      float vort = texture(u_vorticity, v_uv).x;
-      vec2 force = vec2(t - b, r - l);
-      float len = length(force) + 1e-5;
-      force = force / len * u_curl * vort;
-      vec2 vel = texture(u_velocity, v_uv).xy;
-      fragColor = vec4(vel + force * u_dt, 0.0, 1.0);
-    }`;
+const DIVERGENCE = HEAD + `
+uniform sampler2D u_vel;
+void main() {
+  float l = texture(u_vel, v_uv - vec2(u_texel.x, 0.0)).x;
+  float r = texture(u_vel, v_uv + vec2(u_texel.x, 0.0)).x;
+  float t = texture(u_vel, v_uv + vec2(0.0, u_texel.y)).y;
+  float b = texture(u_vel, v_uv - vec2(0.0, u_texel.y)).y;
+  o = vec4(0.5 * ((r - l) + (t - b)), 0.0, 0.0, 1.0);
+}`;
 
-  const fsSplat = `#version 300 es
-    precision highp float;
-    uniform sampler2D u_base;
-    uniform vec2 u_point;
-    uniform vec2 u_value;
-    uniform float u_radius;
-    in vec2 v_uv;
-    out vec4 fragColor;
-    void main() {
-      float d = length(v_uv - u_point);
-      float w = exp(-d * d / u_radius);
-      vec2 base = texture(u_base, v_uv).xy;
-      fragColor = vec4(base + u_value * w, 0.0, 1.0);
-    }`;
+const PRESSURE_FETCH = `
+float P(vec2 uv) { return uv.x > 1.0 ? 0.0 : texture(u_p, uv).x; }
+`;
 
-  const fsDye = `#version 300 es
-    precision highp float;
-    uniform sampler2D u_velocity;
-    uniform sampler2D u_vorticity;
-    uniform float u_darkMode;
-    in vec2 v_uv;
-    out vec4 fragColor;
-    void main() {
-      vec2 vel  = texture(u_velocity,  v_uv).xy;
-      float vort = texture(u_vorticity, v_uv).x;
-      float speed = clamp(length(vel) * 60.0, 0.0, 1.0);
-      float v = clamp(vort * 10.0, -1.0, 1.0);
+const JACOBI = HEAD + `
+uniform sampler2D u_p, u_div;
+` + PRESSURE_FETCH + `
+void main() {
+  float l = P(v_uv - vec2(u_texel.x, 0.0));
+  float r = P(v_uv + vec2(u_texel.x, 0.0));
+  float t = P(v_uv + vec2(0.0, u_texel.y));
+  float b = P(v_uv - vec2(0.0, u_texel.y));
+  float d = texture(u_div, v_uv).x;
+  o = vec4(0.25 * (l + r + t + b - d), 0.0, 0.0, 1.0);
+}`;
 
-      vec3 col;
-      if (u_darkMode > 0.5) {
-        // dark mode: deep navy base, speed adds cyan brightness, vorticity adds green/magenta
-        float base = 0.04 + speed * 0.18;
-        float pos = max(v, 0.0);
-        float neg = max(-v, 0.0);
-        col = vec3(base + neg * 0.5, base + pos * 0.85 + neg * 0.1, base + 0.08);
-        col = clamp(col, 0.0, 1.0);
-      } else {
-        // light mode: off-white base, vorticity adds red tones
-        float pos = max(v, 0.0);
-        float neg = max(-v, 0.0);
-        col = vec3(1.0 - neg * 0.05, 1.0 - pos * 0.70 - neg * 0.40, 1.0 - pos * 0.70 - neg * 0.05);
-        col = clamp(col, 0.0, 1.0);
-      }
-      fragColor = vec4(col, 1.0);
-    }`;
+const GRADIENT = HEAD + `
+uniform sampler2D u_p, u_vel;
+` + PRESSURE_FETCH + `
+void main() {
+  float l = P(v_uv - vec2(u_texel.x, 0.0));
+  float r = P(v_uv + vec2(u_texel.x, 0.0));
+  float t = P(v_uv + vec2(0.0, u_texel.y));
+  float b = P(v_uv - vec2(0.0, u_texel.y));
+  vec2 v = texture(u_vel, v_uv).xy - 0.5 * vec2(r - l, t - b);
+  if (v_uv.x < 2.5 * u_texel.x) v = vec2(0.0);
+  if (v_uv.y < u_texel.y || v_uv.y > 1.0 - u_texel.y) v.y = 0.0;
+  o = vec4(v, 0.0, 1.0);
+}`;
 
-  // ── compile ────────────────────────────────────────────────────────────────
+const DISPLAY = HEAD + `
+uniform sampler2D u_curl;
+uniform float u_dark;
+void main() {
+  float w = abs(texture(u_curl, v_uv).x);
+  float a = smoothstep(0.9, 7.0, w);
+  vec3 bg = mix(vec3(1.0), vec3(0.0), u_dark);
+  vec3 ink = mix(vec3(0.95, 0.42, 0.42), vec3(0.18, 0.95, 0.45), u_dark);
+  o = vec4(mix(bg, ink, a), 1.0);
+}`;
 
-  function compile(vsSrc, fsSrc) {
-    const vs = gl.createShader(gl.VERTEX_SHADER);
-    gl.shaderSource(vs, vsSrc);
-    gl.compileShader(vs);
-    if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(vs));
+export function createFluidSolver(gl, W, H) {
+  if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('EXT_color_buffer_float not supported');
 
-    const fs = gl.createShader(gl.FRAGMENT_SHADER);
-    gl.shaderSource(fs, fsSrc);
-    gl.compileShader(fs);
-    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(fs));
+  const simH = SIM_H;
+  const simW = Math.round(SIM_H * W / H);
+  const texel = [1 / simW, 1 / simH];
 
-    const prog = gl.createProgram();
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
-    return prog;
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
   }
-
-  const progAdvect    = compile(vsQuad, fsAdvect);
-  const progDiv       = compile(vsQuad, fsDivergence);
-  const progPressure  = compile(vsQuad, fsPressure);
-  const progSubtract  = compile(vsQuad, fsSubtract);
-  const progVorticity = compile(vsQuad, fsVorticity);
-  const progVortForce = compile(vsQuad, fsVortForce);
-  const progSplat     = compile(vsQuad, fsSplat);
-  const progDye       = compile(vsQuad, fsDye);
-
-  // ── quad VAO ───────────────────────────────────────────────────────────────
-
-  const vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-  const buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-
-  function bindAttr(prog) {
-    gl.bindAttribLocation(prog, 0, 'a_pos');
-    gl.linkProgram(prog);
+  function program(vs, fs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    const loc = {};
+    const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < n; i++) {
+      const name = gl.getActiveUniform(p, i).name;
+      loc[name] = gl.getUniformLocation(p, name);
+    }
+    return { p, loc };
   }
-  [progAdvect,progDiv,progPressure,progSubtract,progVorticity,progVortForce,progSplat,progDye]
-    .forEach(bindAttr);
-
-  // ── FBO helpers ────────────────────────────────────────────────────────────
-
-  function makeFBO(w, h) {
+  function target(internal, format, filter) {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, w, h, 0, gl.RG, gl.FLOAT, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internal, simW, simH, 0, format, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     const fbo = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    return { tex, fbo, w, h };
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error('framebuffer incomplete for internal format ' + internal);
+    }
+    return { tex, fbo };
   }
-
-  function makeScalarFBO(w, h) {
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, w, h, 0, gl.RED, gl.FLOAT, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    const fbo = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    return { tex, fbo, w, h };
-  }
-
-  function makePing(w, h, scalar = false) {
-    const a = scalar ? makeScalarFBO(w, h) : makeFBO(w, h);
-    const b = scalar ? makeScalarFBO(w, h) : makeFBO(w, h);
+  function pair(internal, format, filter) {
+    const a = target(internal, format, filter), b = target(internal, format, filter);
     return { read: a, write: b, swap() { const t = this.read; this.read = this.write; this.write = t; } };
   }
 
-  const SIM = 256;
-  let velocity  = makePing(SIM, SIM);
-  let pressure  = makePing(SIM, SIM, true);
-  let divergence= makeScalarFBO(SIM, SIM);
-  let vorticity = makeScalarFBO(SIM, SIM);
+  // velocity: half float, bilinear (needed for advection). pressure/divergence: full float, nearest.
+  const velocity = pair(gl.RG16F, gl.RG, gl.LINEAR);
+  const pressure = pair(gl.R32F, gl.RED, gl.NEAREST);
+  const divergence = target(gl.R32F, gl.RED, gl.NEAREST);
+  const curl = target(gl.R16F, gl.RED, gl.LINEAR);
 
-  // ── draw helpers ──────────────────────────────────────────────────────────
+  for (const t of [velocity.read, velocity.write]) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
+    gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 1]);
+  }
+  for (const t of [pressure.read, pressure.write]) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
+    gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 1]);
+  }
 
-  function useProgram(prog) { gl.useProgram(prog); gl.bindVertexArray(vao); }
+  const progs = {
+    advect: program(VERT, ADVECT),
+    curl: program(VERT, CURL),
+    confine: program(VERT, CONFINE),
+    div: program(VERT, DIVERGENCE),
+    jacobi: program(VERT, JACOBI),
+    grad: program(VERT, GRADIENT),
+    display: program(VERT, DISPLAY),
+    body: program(BODY_VERT, BODY_FRAG),
+  };
 
-  function setTex(prog, name, unit, tex) {
+  const quadVao = gl.createVertexArray();
+  gl.bindVertexArray(quadVao);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+  // swimmer strips: [x, y, vx, vy] per vertex
+  const bodyVao = gl.createVertexArray();
+  gl.bindVertexArray(bodyVao);
+  const bodyBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, bodyBuf);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+  gl.bindVertexArray(null);
+
+  function bindTex(unit, tex, loc) {
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.uniform1i(gl.getUniformLocation(prog, name), unit);
+    gl.uniform1i(loc, unit);
   }
 
-  function drawToFBO(fbo, w, h) {
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.viewport(0, 0, w, h);
+  function pass(prog, out, setup) {
+    gl.useProgram(prog.p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, out.fbo);
+    gl.viewport(0, 0, simW, simH);
+    gl.uniform2f(prog.loc.u_texel, texel[0], texel[1]);
+    setup(prog.loc);
+    gl.bindVertexArray(quadVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  const texelX = 1 / SIM, texelY = 1 / SIM;
-
-  // ── splat velocity ─────────────────────────────────────────────────────────
-
-  function splatVelocity(uvX, uvY, vx, vy, radius) {
-    useProgram(progSplat);
-    setTex(progSplat, 'u_base', 0, velocity.read.tex);
-    gl.uniform2f(gl.getUniformLocation(progSplat, 'u_point'), uvX, uvY);
-    gl.uniform2f(gl.getUniformLocation(progSplat, 'u_value'), vx, vy);
-    gl.uniform1f(gl.getUniformLocation(progSplat, 'u_radius'), radius * radius);
-    drawToFBO(velocity.write.fbo, SIM, SIM);
-    velocity.swap();
+  function stamp(strips) {
+    gl.useProgram(progs.body.p);
+    gl.uniform1f(progs.body.loc.u_inflow, INFLOW);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, velocity.read.fbo);
+    gl.viewport(0, 0, simW, simH);
+    gl.bindVertexArray(bodyVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bodyBuf);
+    for (const s of strips) {
+      gl.bufferData(gl.ARRAY_BUFFER, s, gl.DYNAMIC_DRAW);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, s.length / 4);
+    }
+    gl.bindVertexArray(null);
   }
 
-  // ── step ──────────────────────────────────────────────────────────────────
+  function computeCurl() {
+    pass(progs.curl, curl, L => bindTex(0, velocity.read.tex, L.u_vel));
+  }
 
-  function step(dt) {
+  function step(dt, strips) {
     gl.disable(gl.BLEND);
 
-    // advect velocity
-    useProgram(progAdvect);
-    setTex(progAdvect, 'u_velocity', 0, velocity.read.tex);
-    setTex(progAdvect, 'u_source',   1, velocity.read.tex);
-    gl.uniform1f(gl.getUniformLocation(progAdvect, 'u_dt'), dt * SIM);
-    gl.uniform2f(gl.getUniformLocation(progAdvect, 'u_texel'), texelX, texelY);
-    drawToFBO(velocity.write.fbo, SIM, SIM);
+    pass(progs.advect, velocity.write, L => {
+      bindTex(0, velocity.read.tex, L.u_vel);
+      gl.uniform1f(L.u_dt, dt);
+      gl.uniform1f(L.u_inflow, INFLOW);
+    });
     velocity.swap();
 
-    // vorticity
-    useProgram(progVorticity);
-    setTex(progVorticity, 'u_velocity', 0, velocity.read.tex);
-    gl.uniform2f(gl.getUniformLocation(progVorticity, 'u_texel'), texelX, texelY);
-    drawToFBO(vorticity.fbo, SIM, SIM);
-
-    // vorticity confinement
-    useProgram(progVortForce);
-    setTex(progVortForce, 'u_velocity',  0, velocity.read.tex);
-    setTex(progVortForce, 'u_vorticity', 1, vorticity.tex);
-    gl.uniform2f(gl.getUniformLocation(progVortForce, 'u_texel'), texelX, texelY);
-    gl.uniform1f(gl.getUniformLocation(progVortForce, 'u_curl'), 18.0);
-    gl.uniform1f(gl.getUniformLocation(progVortForce, 'u_dt'), dt);
-    drawToFBO(velocity.write.fbo, SIM, SIM);
+    computeCurl();
+    pass(progs.confine, velocity.write, L => {
+      bindTex(0, velocity.read.tex, L.u_vel);
+      bindTex(1, curl.tex, L.u_curl);
+      gl.uniform1f(L.u_dt, dt);
+      gl.uniform1f(L.u_eps, CONFINEMENT);
+    });
     velocity.swap();
 
-    // divergence
-    useProgram(progDiv);
-    setTex(progDiv, 'u_velocity', 0, velocity.read.tex);
-    gl.uniform2f(gl.getUniformLocation(progDiv, 'u_texel'), texelX, texelY);
-    drawToFBO(divergence.fbo, SIM, SIM);
+    stamp(strips);
 
-    // pressure solve (20 iterations)
-    for (let i = 0; i < 20; i++) {
-      useProgram(progPressure);
-      setTex(progPressure, 'u_pressure',   0, pressure.read.tex);
-      setTex(progPressure, 'u_divergence', 1, divergence.tex);
-      gl.uniform2f(gl.getUniformLocation(progPressure, 'u_texel'), texelX, texelY);
-      drawToFBO(pressure.write.fbo, SIM, SIM);
+    pass(progs.div, divergence, L => bindTex(0, velocity.read.tex, L.u_vel));
+    for (let i = 0; i < PRESSURE_ITERS; i++) {
+      pass(progs.jacobi, pressure.write, L => {
+        bindTex(0, pressure.read.tex, L.u_p);
+        bindTex(1, divergence.tex, L.u_div);
+      });
       pressure.swap();
     }
-
-    // subtract pressure gradient
-    useProgram(progSubtract);
-    setTex(progSubtract, 'u_velocity', 0, velocity.read.tex);
-    setTex(progSubtract, 'u_pressure', 1, pressure.read.tex);
-    gl.uniform2f(gl.getUniformLocation(progSubtract, 'u_texel'), texelX, texelY);
-    drawToFBO(velocity.write.fbo, SIM, SIM);
+    pass(progs.grad, velocity.write, L => {
+      bindTex(0, pressure.read.tex, L.u_p);
+      bindTex(1, velocity.read.tex, L.u_vel);
+    });
     velocity.swap();
 
-    // recompute vorticity for display
-    useProgram(progVorticity);
-    setTex(progVorticity, 'u_velocity', 0, velocity.read.tex);
-    gl.uniform2f(gl.getUniformLocation(progVorticity, 'u_texel'), texelX, texelY);
-    drawToFBO(vorticity.fbo, SIM, SIM);
+    stamp(strips);
+    computeCurl();
   }
 
-  // ── render to screen ──────────────────────────────────────────────────────
-
-  function render(screenW, screenH, darkMode) {
+  function render(w, h, dark) {
+    gl.useProgram(progs.display.p);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, screenW, screenH);
-    // Clear to base color so canvas is never transparent
-    if (darkMode) gl.clearColor(0.04, 0.04, 0.10, 1.0);
-    else          gl.clearColor(0.94, 0.94, 0.92, 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    useProgram(progDye);
-    setTex(progDye, 'u_velocity',  0, velocity.read.tex);
-    setTex(progDye, 'u_vorticity', 1, vorticity.tex);
-    gl.uniform1f(gl.getUniformLocation(progDye, 'u_darkMode'), darkMode ? 1.0 : 0.0);
+    gl.viewport(0, 0, w, h);
+    gl.uniform2f(progs.display.loc.u_texel, texel[0], texel[1]);
+    bindTex(0, curl.tex, progs.display.loc.u_curl);
+    gl.uniform1f(progs.display.loc.u_dark, dark ? 1 : 0);
+    gl.bindVertexArray(quadVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  return { step, splatVelocity, render, getVorticity: () => vorticity };
+  return { step, render, inflow: INFLOW, simW, simH };
 }

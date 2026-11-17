@@ -1,112 +1,97 @@
-// Harlequin diamond formation for a school of swimmers.
-// Fish are added in pairs, alternating right/left, building a chain of diamond cells.
-// The lead fish is at the front-center of the right half.
+// Harlequin diamond formation. Swimmers sit on a lattice of (i, j) points with i + j even:
+// i = steps downstream (to the right, behind), j = steps sideways. One diamond is
+//   front (i, j), sides (i+1, j+1) and (i+1, j-1), back (i+2, j).
+// Diamonds are added as: first one, then to the side (+j), the other side (-j), then behind.
 
-import { Swimmer } from './swimmer.js?v=3';
+import { Swimmer } from './swimmer.js?v=4';
 
-// Diamond lattice parameters (in units of swimmer body length)
-const DX = 1.4;  // stream-wise spacing between rows
-const DY = 1.1;  // lateral half-spacing (each side of center)
+const DX = 0.85;            // stream-wise lattice step, in body lengths
+const DY = 0.42;            // lateral lattice step, in body lengths
+const MAX_LENGTH_FRAC = 0.26; // body length as a fraction of canvas height, before shrinking
+const STROUHAL_K = 1.25;    // tail-beat frequency = K * inflow / bodyLength
 
-// Harlequin ordering: index → {row, side}
-// row 0: lead (0, 0)
-// row 1: (1, +DY), (1, -DY)
-// row 2: (2, +DY), (2, -DY)
-// ...
-// Each set of 4 adjacent fish (rows r, r+1) encloses one diamond cell.
-function formationPosition(index) {
-  if (index === 0) return { rowOffset: 0, lateralOffset: 0 };
-  const pair = Math.ceil(index / 2);
-  const isRight = index % 2 === 1;
-  return {
-    rowOffset: pair,
-    lateralOffset: isRight ? DY : -DY,
+export function formationLattice(n) {
+  const R = 5;
+  const centers = [];
+  for (let a = 0; a <= R; a++) {
+    for (let b = -R; b <= R; b++) if (a + Math.abs(b) <= R) centers.push({ a, b });
+  }
+  centers.sort((p, q) =>
+    (p.a + Math.abs(p.b)) - (q.a + Math.abs(q.b)) || p.a - q.a || q.b - p.b);
+
+  const pts = [];
+  const seen = new Set();
+  const add = (i, j) => {
+    const key = i + ',' + j;
+    if (!seen.has(key)) { seen.add(key); pts.push({ i, j }); }
   };
+  for (const c of centers) {
+    const i = 2 * c.a, j = 2 * c.b;
+    add(i, j); add(i + 1, j + 1); add(i + 1, j - 1); add(i + 2, j);
+    if (pts.length >= n) break;
+  }
+  return pts.slice(0, n);
 }
 
 export class School {
-  constructor(canvasW, canvasH) {
-    this.canvasW = canvasW;
-    this.canvasH = canvasH;
+  constructor(W, H, flow) {
+    this.W = W; this.H = H; this.flow = flow;
+    this.count = 7;
+    this.time = 0;
+    this.freq = 1;
     this.swimmers = [];
-    this.targetN = 7;
-    this.setCount(7);
+    this.setCount(this.count);
   }
 
-  // Compute base length so the formation fits in the right half
-  computeBodyLength(n) {
-    if (n === 0) return 0;
-    const maxRows = n <= 1 ? 0 : Math.ceil((n - 1) / 2);
-    const formationH = (maxRows + 1) * DX;  // stream-wise extent
-    const maxLateral = n <= 1 ? 0 : DY * 2; // lateral extent (both sides)
-
-    // Available region: right half = canvasW/2 wide, full canvasH tall
-    const availW = this.canvasH * 0.78;   // stream-wise fits in vertical
-    const availH = this.canvasW * 0.44;   // lateral fits in horizontal (right half)
-
-    const maxByH = availW / (formationH + 1.5);
-    const maxByW = n <= 1 ? maxByH : availH / (maxLateral + 1.5);
-
-    return Math.min(maxByH, maxByW, this.canvasH * 0.13);
-  }
-
-  resize(w, h) {
-    this.canvasW = w;
-    this.canvasH = h;
-    this.setCount(this.targetN);
+  resize(W, H, flow) {
+    this.W = W; this.H = H; this.flow = flow;
+    this.setCount(this.count);
   }
 
   setCount(n) {
-    this.targetN = n;
-    const bodyLen = this.computeBodyLength(n);
+    this.count = n;
+    const lattice = formationLattice(n);
+    const iMin = Math.min(...lattice.map(p => p.i)), iMax = Math.max(...lattice.map(p => p.i));
+    const jMin = Math.min(...lattice.map(p => p.j)), jMax = Math.max(...lattice.map(p => p.j));
 
-    // Formation origin: right half, vertically centered
-    const originX = this.canvasW * 0.72;
-    const originY = this.canvasH * 0.5;
+    const wUnits = (iMax - iMin) * DX + 1.0;
+    const hUnits = (jMax - jMin) * DY + 0.35;
+    const availW = this.W * 0.44;
+    const availH = this.H * 0.74;
+    const L = Math.min(this.H * MAX_LENGTH_FRAC, availW / wUnits, availH / hUnits);
 
-    this.swimmers = [];
-    for (let i = 0; i < n; i++) {
-      const pos = formationPosition(i);
-      const x = originX - pos.rowOffset * DX * bodyLen;
-      const y = originY + pos.lateralOffset * bodyLen;
-      const s = new Swimmer(x, y, bodyLen);
-      // Stagger phases so they don't all beat in sync
-      s.phase = i * (Math.PI / 3);
-      this.swimmers.push(s);
-    }
+    const cx = this.W * 0.75, cy = this.H * 0.44;
+    const left = cx - (wUnits * L) / 2;
+    const jMid = (jMin + jMax) / 2;
+
+    this.freq = STROUHAL_K * this.flow.inflow / (L * this.flow.cellsPerPx);
+    this.swimmers = lattice.map(p =>
+      new Swimmer(left + (p.i - iMin) * DX * L, cy - (p.j - jMid) * DY * L, L, 0));
+    this.swimmers.forEach(s => s.update(this.time, this.freq));
   }
 
   update(dt) {
-    this.swimmers.forEach(s => s.update(dt));
+    this.time += dt;
+    this.swimmers.forEach(s => s.update(this.time, this.freq));
   }
 
-  injectFluid(fluidSolver) {
-    this.swimmers.forEach(s => s.injectFluid(fluidSolver, this.canvasW, this.canvasH));
-  }
-
-  // Inject a uniform background flow left→right
-  injectBackgroundFlow(fluidSolver) {
-    const rows = 18;
-    for (let r = 0; r < rows; r++) {
-      const uvY = (r + 0.5) / rows;
-      fluidSolver.splatVelocity(0.05, uvY, 0.006, 0.0, 0.025);
-    }
+  // One triangle strip per swimmer: [x_ndc, y_ndc, vx, vy] per vertex, velocities in sim cells/s.
+  bodyStrips() {
+    const sx = 2 / this.W, sy = 2 / this.H, cells = this.flow.cellsPerPx;
+    return this.swimmers.map(s => {
+      const d = new Float32Array(s.n * 2 * 4);
+      let o = 0;
+      for (let k = 0; k < s.n; k++) {
+        const vy = -s.vy[k] * cells;
+        d[o++] = s.upX[k] * sx - 1; d[o++] = 1 - s.upY[k] * sy; d[o++] = 0; d[o++] = vy;
+        d[o++] = s.loX[k] * sx - 1; d[o++] = 1 - s.loY[k] * sy; d[o++] = 0; d[o++] = vy;
+      }
+      return d;
+    });
   }
 
   draw(ctx, darkMode) {
-    this.swimmers.forEach(s => this._drawSwimmer(ctx, s, darkMode));
-  }
-
-  _drawSwimmer(ctx, swimmer, darkMode) {
-    const poly = swimmer.getPolygon(28);
-    if (poly.length < 3) return;
-
-    ctx.beginPath();
-    ctx.moveTo(poly[0].x, poly[0].y);
-    for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
-    ctx.closePath();
-
-    ctx.fillStyle = darkMode ? '#3A6EA5' : '#1a1a2e';
-    ctx.fill();
+    const fill = darkMode ? '#3A6EA5' : '#14141f';
+    this.swimmers.forEach(s => s.draw(ctx, fill));
   }
 }
