@@ -11,6 +11,7 @@ const SIM_H = 288;
 const INFLOW = 40;          // cells/s
 const PRESSURE_ITERS = 40;
 const CONFINEMENT = 6;
+const GATE_LO = 0.3, GATE_HI = 1.2; // confinement only acts where |vorticity| is already significant (else it amplifies noise)
 const STAMP_MODE = new URLSearchParams(location.search).get('stamp') || 'lateral';
 
 const VERT = `#version 300 es
@@ -82,7 +83,7 @@ void main() {
   float c = texture(u_curl, v_uv).x;
   vec2 g = 0.5 * vec2(abs(r) - abs(l), abs(t) - abs(b));
   vec2 n = g / (length(g) + 1e-5);
-  vec2 f = u_eps * vec2(n.y, -n.x) * c;
+  vec2 f = u_eps * vec2(n.y, -n.x) * c * smoothstep(${GATE_LO.toFixed(2)}, ${GATE_HI.toFixed(2)}, abs(c));
   if (v_uv.x < 6.0 * u_texel.x) f = vec2(0.0);
   vec2 v = texture(u_vel, v_uv).xy + u_dt * f;
   o = vec4(v, 0.0, 1.0);

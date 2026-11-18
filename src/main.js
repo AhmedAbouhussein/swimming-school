@@ -1,5 +1,5 @@
-import { createFluidSolver } from './fluid.js?v=8';
-import { School } from './school.js?v=8';
+import { createFluidSolver } from './fluid.js?v=9';
+import { School } from './school.js?v=9';
 
 function showError(msg) {
   const el = document.createElement('pre');

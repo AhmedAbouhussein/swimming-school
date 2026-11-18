@@ -3,7 +3,7 @@
 //   front (i, j), sides (i+1, j+1) and (i+1, j-1), back (i+2, j).
 // Diamonds are added as: first one, then to the side (+j), the other side (-j), then behind.
 
-import { Swimmer, meanTailThrust } from './swimmer.js?v=8';
+import { Swimmer, meanTailThrust } from './swimmer.js?v=9';
 
 const DX = 0.85;            // stream-wise lattice step, in body lengths
 const DY = 0.42;            // lateral lattice step, in body lengths
@@ -11,7 +11,7 @@ const MAX_LENGTH_FRAC = 0.26; // body length as a fraction of canvas height, bef
 const STROUHAL_K = parseFloat(new URLSearchParams(location.search).get('k') || '1.25'); // f = K * U / L
 const PAD_CELLS = 1.0;      // fluid footprint is the drawn body dilated by this many sim cells
 const PSI_MAX = 0.6;        // largest heading command, rad
-export const CTRL = { kp: 1.5, kd: 4, ki: 0.4, kpy: 1.2, kdy: 1.5, boost: 1.0, iMax: 0.4 };
+export const CTRL = { kp: 1.5, kd: 4, ki: 0.4, kpy: 1.2, kdy: 1.5, boost: 1.0, iMax: 0.4, fMin: 0.7, fMax: 1.6 };
 const PUSH_SPEED = 0.5;     // click / URL push kick, in free-stream speeds
 const PUSH_RADIUS = 2.5;    // click push reach, in body lengths
 
@@ -112,7 +112,7 @@ export class School {
     const u = CTRL.kp * s.dx / L + CTRL.kd * s.vxb / this.U0 + CTRL.ki * s.ix;
     const psi = -(CTRL.kpy * s.dy / L + CTRL.kdy * s.vyb / this.U0);
     c.psi = Math.max(-PSI_MAX, Math.min(PSI_MAX, psi));
-    c.f = Math.max(0.4, Math.min(1.8, 1 + u + CTRL.boost * Math.abs(c.psi)));
+    c.f = Math.max(CTRL.fMin, Math.min(CTRL.fMax, 1 + u + CTRL.boost * Math.abs(c.psi)));
   }
 
   clamp(s) {

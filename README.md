@@ -50,7 +50,7 @@ Swimmers are no longer nailed to their slot. Each has a rigid-body **state** (of
 
 ### Baseline controller and push
 
-A hand-tuned PID keeps each swimmer in its slot: beat-frequency scale for the streamwise error, heading command for the sideways error (the "Hold" button turns it off, so swimmers drift). **Click the water** to push swimmers away from the click (a velocity kick, not a stamped ball), or use `?push=`. Typical recovery is about 10 s; the "Offset" readout is the mean distance from slot in body lengths, and efficiency dips while swimmers coast or sprint back. This controller is the benchmark the RL policies will have to beat; those actions will be beat-frequency scale, amplitude scale and heading command, with reward based on distance from slot (plus efficiency).
+A hand-tuned PID keeps each swimmer in its slot: beat-frequency scale (kept between 0.7 and 1.6 so swimmers never stop beating) for the streamwise error, heading command for the sideways error (the "Hold" button turns it off, so swimmers drift). **Click the water** to push swimmers away from the click (a velocity kick, not a stamped ball), or use `?push=`. Typical recovery is about 10 s; the "Offset" readout is the mean distance from slot in body lengths, and efficiency dips while swimmers coast or sprint back. This controller is the benchmark the RL policies will have to beat; those actions will be beat-frequency scale, amplitude scale and heading command, with reward based on distance from slot (plus efficiency).
 
 ## Formation
 
@@ -72,7 +72,7 @@ A closed slender envelope (about 9:1 length:max-thickness, rounded nose, taperin
 Stam stable-fluids on a 288-cell-high grid (aspect-matched, ~512 wide), in GLSL fragment shaders:
 
 1. Semi-Lagrangian advection (stored field = perturbation from the free stream, so half-float precision stays good)
-2. Vorticity confinement
+2. Vorticity confinement, gated so it only acts where |vorticity| is already significant (ungated, it amplified half-float rounding noise into streaks of tiny vortices ahead of the swimmers)
 3. Body stamping: only the body's **lateral** velocity is written into the field; streamwise flow passes freely (see the key modelling assumption above)
 4. Divergence → 40 Jacobi pressure iterations (open outlet = pressure 0) → gradient subtraction
 5. Bodies stamped again so the next advection sees them
