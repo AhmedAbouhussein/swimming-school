@@ -11,6 +11,8 @@ const W_END = 0.18;              // half-thickness at the tail end, relative to 
 const S_MAX = 0.30;              // position of max thickness
 const N_POINTS = 48;
 const PIVOT_S = 0.35;            // body rotates about this point
+const DISC_S = [0.03, 0.12, 0.21, 0.31, 0.41, 0.51, 0.61, 0.71, 0.81, 0.90, 0.98]; // collision discs along the body
+const DISC_PAD = 0.018;          // disc radius = local half-thickness + this (fraction of L)
 
 export const MU = 0.2;           // body mass / (virtual mass scale): sets how quickly forces change velocity
 export const K_CROSS = 14;       // cross-flow drag / axial drag coefficient ratio (slender body)
@@ -66,6 +68,10 @@ export class Swimmer {
     this.ix = 0;                                // controller integral term
     this.ctrl = { f: 1, a: 1, psi: 0 };         // frequency scale, amplitude scale, heading command
     this.noseX = noseX; this.noseY = y;
+    this.discK = DISC_S.map(t => this.s.reduce((b, v, k) => (Math.abs(v - t) < Math.abs(this.s[b] - t) ? k : b), 0));
+    this.discR = this.discK.map(k => (halfThickness(this.s[k]) + DISC_PAD) * length);
+    this.discX = new Float32Array(DISC_S.length);
+    this.discY = new Float32Array(DISC_S.length);
   }
 
   // Kinematics for the current state; freq is the beat frequency (Hz).
@@ -100,6 +106,11 @@ export class Swimmer {
       this.loX[k] = xp + (lx - xp) * cosP + (ly - yc) * sinP;
       this.loY[k] = yc + (ly - yc) * cosP - (lx - xp) * sinP;
       this.vyField[k] = this.vy[k] + this.vyb - (x - xp) * this.omega;
+    }
+    for (let d = 0; d < this.discK.length; d++) {
+      const k = this.discK[d];
+      this.discX[d] = 0.5 * (this.upX[k] + this.loX[k]);
+      this.discY[d] = 0.5 * (this.upY[k] + this.loY[k]);
     }
     this.noseX = 0.5 * (this.upX[0] + this.loX[0]);
     this.noseY = 0.5 * (this.upY[0] + this.loY[0]);

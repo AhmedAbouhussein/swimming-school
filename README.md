@@ -4,7 +4,7 @@
 
 A browser fluid simulation of a school of slender, tuna-shaped swimmers holding station in a current. WebGL2, all compute on the visitor's GPU: no server, no cost. Hard-reload (Cmd/Ctrl+Shift+R) if the page looks stale.
 
-URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` or the **± Sign** button (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length), `?hold=0` (controller off), `?conf=2` (vorticity-confinement strength), `?dt=0.033` (fixed step for the `warm` frames), `?spam=0.7` (stress test: a click every 0.7 s), `?push=upstream|downstream|up|down&pushAt=6` (kick every swimmer at that sim time), `?debug=1` (log of swimmer 0's offset, heading, beat-frequency scale, efficiency).
+URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` or the **± Sign** button (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length), `?hold=0` (controller off), `?conf=2` (vorticity-confinement strength), `?dt=0.033` (fixed step for the `warm` frames), `?spam=0.7` (stress test: a click every 0.7 s), `?collide=0` (turn swimmer-swimmer contact off), `?push=upstream|downstream|up|down&pushAt=6` (kick every swimmer at that sim time), `?debug=1` (log of swimmer 0's offset, heading, beat-frequency scale, efficiency).
 
 ## Key modelling assumption (read this first)
 
@@ -51,6 +51,10 @@ Swimmers are no longer nailed to their slot. Each has a rigid-body **state** (of
 ### Baseline controller and push
 
 A hand-tuned PID keeps each swimmer in its slot: beat-frequency scale (kept between 0.7 and 1.6 so swimmers never stop beating) for the streamwise error, heading command for the sideways error (the "Hold" button turns it off, so swimmers drift). **Click the water** to push swimmers away from the click (a velocity kick, not a stamped ball), or use `?push=`. Typical recovery is about 10 s; the "Offset" readout is the mean distance from slot in body lengths, and efficiency dips while swimmers coast or sprint back. This controller is the benchmark the RL policies will have to beat; those actions will be beat-frequency scale, amplitude scale and heading command, with reward based on distance from slot (plus efficiency).
+
+### Collisions
+
+Swimmers cannot pass through each other. Each body carries 11 contact discs along its actual (waving, rotated) centreline, radius = local half-thickness + 0.018 L. Any overlapping pair of discs from two swimmers gets a critically damped spring-damper push along the line between centres (stiffness about 40 U0/L rad/s, no attraction), applied equally and oppositely to the two bodies' velocities. It costs a few thousand distance checks per frame at 20 swimmers (bounding-box rejected), negligible next to the fluid solve. Verified fluid-free over a minute of repeated clicks at 30, 60 and 120 fps: with contact, body centrelines never cross; without it they cross for thousands of frames (even with the controller on at 12 swimmers). Limits: contact acts on translation only (no torque, so a glancing hit does not spin a swimmer; heading is still its commanded value); contacts are soft, so a hard squeeze (e.g. a pile against a wall) overlaps by a few percent of a body length; the water does not feel contact beyond the stamped body positions.
 
 ### Stability note (what went wrong once)
 

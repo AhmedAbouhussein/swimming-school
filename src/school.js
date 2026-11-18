@@ -3,7 +3,7 @@
 //   front (i, j), sides (i+1, j+1) and (i+1, j-1), back (i+2, j).
 // Diamonds are added as: first one, then to the side (+j), the other side (-j), then behind.
 
-import { Swimmer, meanTailThrust } from './swimmer.js?v=10';
+import { Swimmer, meanTailThrust } from './swimmer.js?v=11';
 
 const DX = 0.85;            // stream-wise lattice step, in body lengths
 const DY = 0.42;            // lateral lattice step, in body lengths
@@ -12,6 +12,8 @@ const STROUHAL_K = parseFloat(new URLSearchParams(location.search).get('k') || '
 const PAD_CELLS = 1.0;      // fluid footprint is the drawn body dilated by this many sim cells
 const PSI_MAX = 0.6;        // largest heading command, rad
 export const CTRL = { kp: 1.5, kd: 4, ki: 0.4, kpy: 1.2, kdy: 1.5, boost: 1.0, iMax: 0.4, fMin: 0.7, fMax: 1.6 };
+const COLLIDE = new URLSearchParams(location.search).get('collide') !== '0';
+const CONTACT_W = 40;       // contact spring frequency, rad per (U0 / L); critically damped
 const PUSH_SPEED = 0.5;     // click / URL push kick, in free-stream speeds
 const PUSH_RADIUS = 2.5;    // click push reach, in body lengths
 
@@ -99,8 +101,36 @@ export class School {
       s.advance(dt, this.k0);
       this.clamp(s);
     });
+    if (COLLIDE) this.collide(dt);
     this.rings.forEach(r => { r.age += dt; });
     this.rings = this.rings.filter(r => r.age < 0.7);
+  }
+
+  // Soft contact between swimmers: overlapping body discs repel with a critically damped spring,
+  // applied as equal and opposite accelerations on the two bodies' translational state.
+  collide(dt) {
+    const sw = this.swimmers, n = sw.length;
+    for (let i = 0; i < n; i++) {
+      const a = sw[i], L = a.length, w = CONTACT_W * this.U0 / L;
+      for (let j = i + 1; j < n; j++) {
+        const b = sw[j];
+        if (Math.abs(a.discX[5] - b.discX[5]) > 1.3 * L || Math.abs(a.discY[5] - b.discY[5]) > 0.5 * L) continue;
+        let ax = 0, ay = 0;
+        for (let p = 0; p < a.discX.length; p++) {
+          for (let q = 0; q < b.discX.length; q++) {
+            const dx = a.discX[p] - b.discX[q], dy = a.discY[p] - b.discY[q];
+            const d = Math.hypot(dx, dy), pen = a.discR[p] + b.discR[q] - d;
+            if (pen <= 0) continue;
+            const nx = d > 1e-6 ? dx / d : 0, ny = d > 1e-6 ? dy / d : 1;
+            const vn = (a.vxb - b.vxb) * nx + (a.vyb - b.vyb) * ny;
+            const acc = Math.max(0, w * w * pen - 2 * w * vn);
+            ax += acc * nx; ay += acc * ny;
+          }
+        }
+        a.vxb += ax * dt; a.vyb += ay * dt;
+        b.vxb -= ax * dt; b.vyb -= ay * dt;
+      }
+    }
   }
 
   // Baseline PID hold-station controller: beat frequency for x, heading for y.
