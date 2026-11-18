@@ -10,7 +10,7 @@
 const SIM_H = 288;
 const INFLOW = 40;          // cells/s
 const PRESSURE_ITERS = 40;
-const CONFINEMENT = 6;
+const CONFINEMENT = parseFloat(new URLSearchParams(location.search).get('conf') || '2');
 const GATE_LO = 0.3, GATE_HI = 1.2; // confinement only acts where |vorticity| is already significant (else it amplifies noise)
 const STAMP_MODE = new URLSearchParams(location.search).get('stamp') || 'lateral';
 

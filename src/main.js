@@ -1,5 +1,5 @@
-import { createFluidSolver } from './fluid.js?v=9';
-import { School } from './school.js?v=9';
+import { createFluidSolver } from './fluid.js?v=10';
+import { School } from './school.js?v=10';
 
 function showError(msg) {
   const el = document.createElement('pre');
@@ -98,7 +98,8 @@ function init() {
   applyMode();
   applyHold();
   const warm = parseInt(params.get('warm') || '0');
-  for (let i = 0; i < warm && fluid; i++) tick(1 / 60);
+  const warmDt = parseFloat(params.get('dt') || String(1 / 60));
+  for (let i = 0; i < warm && fluid; i++) tick(warmDt);
 }
 
 let resizeTimer;
@@ -135,7 +136,10 @@ modeBtn.addEventListener('click', () => {
   applyMode();
 });
 
+const spam = parseFloat(params.get('spam') || '0');
+let spamNext = 3, spamI = 0;
 function tick(dt) {
+  if (spam && school.time >= spamNext) { spamNext += spam; const a = spamI++ * 2.4; school.pushAt(school.W * (0.62 + 0.12 * Math.cos(a)), school.H * (0.44 + 0.15 * Math.sin(a * 1.7))); }
   if (pushDir && !pushed && school.time >= pushAt) { pushed = true; school.pushAll(pushDir[0] * 0.5, pushDir[1] * 0.5); }
   school.update(dt);
   fluid.step(dt, school.bodyStrips());

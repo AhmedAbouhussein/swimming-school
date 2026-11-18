@@ -4,7 +4,7 @@
 
 A browser fluid simulation of a school of slender, tuna-shaped swimmers holding station in a current. WebGL2, all compute on the visitor's GPU: no server, no cost. Hard-reload (Cmd/Ctrl+Shift+R) if the page looks stale.
 
-URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` or the **± Sign** button (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length), `?hold=0` (controller off), `?push=upstream|downstream|up|down&pushAt=6` (kick every swimmer at that sim time), `?debug=1` (log of swimmer 0's offset, heading, beat-frequency scale, efficiency).
+URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` or the **± Sign** button (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length), `?hold=0` (controller off), `?conf=2` (vorticity-confinement strength), `?dt=0.033` (fixed step for the `warm` frames), `?spam=0.7` (stress test: a click every 0.7 s), `?push=upstream|downstream|up|down&pushAt=6` (kick every swimmer at that sim time), `?debug=1` (log of swimmer 0's offset, heading, beat-frequency scale, efficiency).
 
 ## Key modelling assumption (read this first)
 
@@ -52,6 +52,10 @@ Swimmers are no longer nailed to their slot. Each has a rigid-body **state** (of
 
 A hand-tuned PID keeps each swimmer in its slot: beat-frequency scale (kept between 0.7 and 1.6 so swimmers never stop beating) for the streamwise error, heading command for the sideways error (the "Hold" button turns it off, so swimmers drift). **Click the water** to push swimmers away from the click (a velocity kick, not a stamped ball), or use `?push=`. Typical recovery is about 10 s; the "Offset" readout is the mean distance from slot in body lengths, and efficiency dips while swimmers coast or sprint back. This controller is the benchmark the RL policies will have to beat; those actions will be beat-frequency scale, amplitude scale and heading command, with reward based on distance from slot (plus efficiency).
 
+### Stability note (what went wrong once)
+
+After swimmers were unpinned, repeated clicks turned the flow chaotic (speckled debris, comb of tiny vortices, swimmers scattered). Root cause, found by bisection: vorticity-confinement strength 6 was too high. It re-amplifies any strong shear into small vortices, which was tolerable only while the wake was steady. Rigid-body swimmer state was **not** the cause (it stays bounded at 30, 60 and 120 fps; dropping the rotation term from the stamp did not help), and the earlier "random upstream vortices" were the same mechanism. Strength 2 gives crisp, coherent vortices undisturbed (50 s) and under a click every 0.7 s (`?spam=0.7`). Repeated clicks still displace swimmers, because the baseline needs about 10 s to recover; that is expected, not an instability.
+
 ## Formation
 
 Swimmers sit on a harlequin (repeating-diamond) lattice. One diamond = front swimmer, two side swimmers, and a back swimmer directly behind the front one (same height, horizontal offset only):
@@ -72,7 +76,7 @@ A closed slender envelope (about 9:1 length:max-thickness, rounded nose, taperin
 Stam stable-fluids on a 288-cell-high grid (aspect-matched, ~512 wide), in GLSL fragment shaders:
 
 1. Semi-Lagrangian advection (stored field = perturbation from the free stream, so half-float precision stays good)
-2. Vorticity confinement, gated so it only acts where |vorticity| is already significant (ungated, it amplified half-float rounding noise into streaks of tiny vortices ahead of the swimmers)
+2. Vorticity confinement (strength 2), gated so it only acts where |vorticity| is already significant. Strength matters: at 6 it shredded wakes into speckle and made the flow chaotic under disturbance (see below); 0 gives smooth but blurry vortices
 3. Body stamping: only the body's **lateral** velocity is written into the field; streamwise flow passes freely (see the key modelling assumption above)
 4. Divergence → 40 Jacobi pressure iterations (open outlet = pressure 0) → gradient subtraction
 5. Bodies stamped again so the next advection sees them
