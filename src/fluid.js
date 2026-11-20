@@ -1,29 +1,24 @@
-// Stable-fluids (Stam) solver in WebGL2, set up as a wind tunnel:
-//   - a steady current U enters at the left edge and leaves through the open right edge,
+// Stable-fluids (Stam) solver in WebGL2. Default is still water (free stream 0, `?flow=` sets one):
+//   - an optional steady current U enters at the left edge and leaves through the open right edge,
 //   - top/bottom are free-slip walls,
-//   - swimmers are moving solid bodies stamped into the velocity field (no-slip), so they
-//     shed real wake vortices into the current.
+//   - swimmers are moving impermeable, frictionless bodies: inside the footprint the velocity component
+//     normal to the body is forced to the body's, so they shed real wake vortices, and the momentum this
+//     gives the fluid each step is measured (impulse()) so the water's reaction can push the swimmer.
 // Units: velocity in sim cells/s, time in seconds.
 // The stored field is the perturbation from the free stream (u - U), which keeps half-float precision
 // meaningful; the uniform U is added back when advecting.
 
 const SIM_H = 288;
-const INFLOW = 40;          // cells/s
+const INFLOW = parseFloat(new URLSearchParams(location.search).get('flow') || '0'); // free-stream speed, cells/s (0 = still water)
 const PRESSURE_ITERS = 40;
 const CONFINEMENT = parseFloat(new URLSearchParams(location.search).get('conf') || '2');
 const GATE_LO = 0.3, GATE_HI = 1.2; // confinement only acts where |vorticity| is already significant (else it amplifies noise)
-const STAMP_MODE = new URLSearchParams(location.search).get('stamp') || 'lateral';
+const BLOCK = 8;            // force-measurement reduction block size, cells
 
 const VERT = `#version 300 es
 layout(location=0) in vec2 a_pos;
 out vec2 v_uv;
 void main() { v_uv = a_pos * 0.5 + 0.5; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
-
-const BODY_VERT = `#version 300 es
-layout(location=0) in vec2 a_pos;
-layout(location=1) in vec2 a_vel;
-out vec2 v_vel;
-void main() { v_vel = a_vel; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
 
 const HEAD = `#version 300 es
 precision highp float;
@@ -33,12 +28,64 @@ out vec4 o;
 uniform vec2 u_texel;
 `;
 
+const BODY_VERT = `#version 300 es
+layout(location=0) in vec2 a_pos;
+layout(location=1) in vec2 a_ub;
+layout(location=2) in vec2 a_n;
+out vec2 v_ub;
+out vec2 v_n;
+void main() { v_ub = a_ub; v_n = a_n; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+
+// Body map: xy = body velocity, zw = unit normal of the body axis (zero outside bodies).
 const BODY_FRAG = `#version 300 es
 precision highp float;
-in vec2 v_vel;
-uniform float u_inflow;
+in vec2 v_ub;
+in vec2 v_n;
 out vec4 o;
-void main() { o = vec4(v_vel - vec2(u_inflow, 0.0), 0.0, 1.0); }`;
+void main() { o = vec4(v_ub, normalize(v_n)); }`;
+
+// Impermeable, frictionless body: inside the footprint only the velocity component normal to the
+// body is forced to the body's; the tangential component is left to the fluid.
+const APPLY = HEAD + `
+uniform sampler2D u_vel, u_body;
+uniform float u_inflow;
+void main() {
+  vec2 u = texture(u_vel, v_uv).xy;
+  vec4 b = texture(u_body, v_uv);
+  if (dot(b.zw, b.zw) > 0.25) u -= dot(u - (b.xy - vec2(u_inflow, 0.0)), b.zw) * b.zw;
+  o = vec4(u, 0.0, 1.0);
+}`;
+
+// Sum of (after - before) over each BLOCK x BLOCK tile: the momentum the stamp gave the fluid.
+const REDUCE_BLOCKS = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+out vec4 o;
+uniform sampler2D u_before, u_after;
+uniform int u_block;
+void main() {
+  ivec2 size = textureSize(u_after, 0);
+  ivec2 base = ivec2(gl_FragCoord.xy) * u_block;
+  vec2 sum = vec2(0.0);
+  for (int j = 0; j < u_block; j++) for (int i = 0; i < u_block; i++) {
+    ivec2 p = base + ivec2(i, j);
+    if (p.x < size.x && p.y < size.y) sum += texelFetch(u_after, p, 0).xy - texelFetch(u_before, p, 0).xy;
+  }
+  o = vec4(sum, 0.0, 1.0);
+}`;
+
+const REDUCE_TOTAL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+out vec4 o;
+uniform sampler2D u_a, u_b;
+void main() {
+  ivec2 size = textureSize(u_a, 0);
+  vec2 sum = vec2(0.0);
+  for (int j = 0; j < size.y; j++) for (int i = 0; i < size.x; i++)
+    sum += texelFetch(u_a, ivec2(i, j), 0).xy + texelFetch(u_b, ivec2(i, j), 0).xy;
+  o = vec4(sum, 0.0, 1.0);
+}`;
 
 const ADVECT = HEAD + `
 uniform sampler2D u_vel;
@@ -170,10 +217,10 @@ export function createFluidSolver(gl, W, H) {
     }
     return { p, loc };
   }
-  function target(internal, format, filter) {
+  function target(internal, format, filter, w = simW, h = simH) {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, internal, simW, simH, 0, format, gl.FLOAT, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, gl.FLOAT, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -196,6 +243,12 @@ export function createFluidSolver(gl, W, H) {
   const pressure = pair(gl.R32F, gl.RED, gl.NEAREST);
   const divergence = target(gl.R32F, gl.RED, gl.NEAREST);
   const curl = target(gl.R16F, gl.RED, gl.LINEAR);
+  const bodyMap = target(gl.RGBA16F, gl.RGBA, gl.NEAREST);
+  const bw = Math.ceil(simW / BLOCK), bh = Math.ceil(simH / BLOCK);
+  const blocks = [target(gl.RGBA32F, gl.RGBA, gl.NEAREST, bw, bh), target(gl.RGBA32F, gl.RGBA, gl.NEAREST, bw, bh)];
+  const total = target(gl.RGBA32F, gl.RGBA, gl.NEAREST, 1, 1);
+  const totalOut = new Float32Array(4);
+  let impulse = [0, 0];
   const probeT = (() => {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -227,6 +280,9 @@ export function createFluidSolver(gl, W, H) {
     grad: program(VERT, GRADIENT),
     display: program(VERT, DISPLAY),
     body: program(BODY_VERT, BODY_FRAG),
+    apply: program(VERT, APPLY),
+    reduceBlocks: program(VERT, REDUCE_BLOCKS),
+    reduceTotal: program(VERT, REDUCE_TOTAL),
   };
 
   const quadVao = gl.createVertexArray();
@@ -237,15 +293,17 @@ export function createFluidSolver(gl, W, H) {
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-  // swimmer strips: [x, y, vx, vy] per vertex
+  // swimmer strips: [x, y, ubx, uby, nx, ny] per vertex
   const bodyVao = gl.createVertexArray();
   gl.bindVertexArray(bodyVao);
   const bodyBuf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, bodyBuf);
   gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 24, 0);
   gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 24, 8);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 24, 16);
   gl.bindVertexArray(null);
 
   function bindTex(unit, tex, loc) {
@@ -264,20 +322,48 @@ export function createFluidSolver(gl, W, H) {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  function stamp(strips) {
+  function drawBodies(strips) {
     gl.useProgram(progs.body.p);
-    gl.uniform1f(progs.body.loc.u_inflow, INFLOW);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, velocity.read.fbo);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bodyMap.fbo);
     gl.viewport(0, 0, simW, simH);
+    gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
     gl.bindVertexArray(bodyVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, bodyBuf);
-    if (STAMP_MODE === 'lateral') gl.colorMask(false, true, false, false);
     for (const s of strips) {
       gl.bufferData(gl.ARRAY_BUFFER, s, gl.DYNAMIC_DRAW);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, s.length / 4);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, s.length / 6);
     }
-    gl.colorMask(true, true, true, true);
     gl.bindVertexArray(null);
+  }
+
+  // Apply the bodies' normal-velocity constraint and sum the momentum it gave the fluid into blocks[slot].
+  function applyBodies(slot) {
+    pass(progs.apply, velocity.write, L => {
+      bindTex(0, velocity.read.tex, L.u_vel);
+      bindTex(1, bodyMap.tex, L.u_body);
+      gl.uniform1f(L.u_inflow, INFLOW);
+    });
+    gl.useProgram(progs.reduceBlocks.p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blocks[slot].fbo);
+    gl.viewport(0, 0, bw, bh);
+    bindTex(0, velocity.read.tex, progs.reduceBlocks.loc.u_before);
+    bindTex(1, velocity.write.tex, progs.reduceBlocks.loc.u_after);
+    gl.uniform1i(progs.reduceBlocks.loc.u_block, BLOCK);
+    gl.bindVertexArray(quadVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    velocity.swap();
+  }
+
+  function measureImpulse() {
+    gl.useProgram(progs.reduceTotal.p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, total.fbo);
+    gl.viewport(0, 0, 1, 1);
+    bindTex(0, blocks[0].tex, progs.reduceTotal.loc.u_a);
+    bindTex(1, blocks[1].tex, progs.reduceTotal.loc.u_b);
+    gl.bindVertexArray(quadVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, totalOut);
+    impulse = [totalOut[0], totalOut[1]];
   }
 
   function computeCurl() {
@@ -303,7 +389,8 @@ export function createFluidSolver(gl, W, H) {
     });
     velocity.swap();
 
-    stamp(strips);
+    drawBodies(strips);
+    applyBodies(0);
 
     pass(progs.div, divergence, L => bindTex(0, velocity.read.tex, L.u_vel));
     for (let i = 0; i < PRESSURE_ITERS; i++) {
@@ -319,8 +406,16 @@ export function createFluidSolver(gl, W, H) {
     });
     velocity.swap();
 
-    stamp(strips);
+    applyBodies(1);
+    measureImpulse();
     computeCurl();
+  }
+
+  function clear() {
+    for (const t of [velocity.read, velocity.write, pressure.read, pressure.write]) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
+      gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 1]);
+    }
   }
 
   function render(w, h, dark) {
@@ -354,5 +449,5 @@ export function createFluidSolver(gl, W, H) {
     return out;
   }
 
-  return { step, render, probe, setSign(v) { debugSign = v; }, inflow: INFLOW, simW, simH };
+  return { step, render, probe, clear, impulse: () => impulse, setSign(v) { debugSign = v; }, inflow: INFLOW, simW, simH };
 }

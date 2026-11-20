@@ -1,21 +1,24 @@
-// Harlequin diamond formation. Swimmers sit on a lattice of (i, j) points with i + j even:
-// i = steps downstream (to the right, behind), j = steps sideways. One diamond is
+// A swimmer starts at rest on the right of a still-water domain and swims left with fixed kinematics,
+// pushed only by the reaction force the fluid solver measures on its body (minus skin-friction drag).
+// Schooling code (lattice, contact) is kept for later but the force measurement is for one swimmer.
+// Formation (for n > 1): harlequin diamond lattice. Swimmers sit on points (i, j) with i + j even:
+// i = steps behind (to the right), j = steps sideways. One diamond is
 //   front (i, j), sides (i+1, j+1) and (i+1, j-1), back (i+2, j).
 // Diamonds are added as: first one, then to the side (+j), the other side (-j), then behind.
 
-import { Swimmer, meanTailThrust } from './swimmer.js?v=11';
+import { Swimmer, bodyArea } from './swimmer.js?v=13';
 
-const DX = 0.85;            // stream-wise lattice step, in body lengths
+const DX = 0.85;            // lattice step along the swimming direction, in body lengths
 const DY = 0.42;            // lateral lattice step, in body lengths
 const MAX_LENGTH_FRAC = 0.26; // body length as a fraction of canvas height, before shrinking
 const STROUHAL_K = parseFloat(new URLSearchParams(location.search).get('k') || '1.25'); // f = K * U / L
 const PAD_CELLS = 1.0;      // fluid footprint is the drawn body dilated by this many sim cells
-const PSI_MAX = 0.6;        // largest heading command, rad
-export const CTRL = { kp: 1.5, kd: 4, ki: 0.4, kpy: 1.2, kdy: 1.5, boost: 1.0, iMax: 0.4, fMin: 0.7, fMax: 1.6 };
 const COLLIDE = new URLSearchParams(location.search).get('collide') !== '0';
 const CONTACT_W = 40;       // contact spring frequency, rad per (U0 / L); critically damped
-const PUSH_SPEED = 0.5;     // click / URL push kick, in free-stream speeds
-const PUSH_RADIUS = 2.5;    // click push reach, in body lengths
+const START_RIGHT = 0.97;   // the school's tail starts at this fraction of the width
+const PARAMS = new URLSearchParams(location.search);
+const CF = parseFloat(PARAMS.get('cf') || '0.008');  // skin-friction coefficient (formula drag; grid cannot resolve it)
+const PIN = PARAMS.get('pin') === '1';               // hold the body still (force-vs-flow experiments)
 
 export function formationLattice(n) {
   const R = 5;
@@ -41,14 +44,14 @@ export function formationLattice(n) {
 }
 
 export class School {
+  // flow = { cruise, cellsPerPx }: cruise is the reference speed in sim cells/s that sets the beat frequency
+  // (f = K U / L); the speed actually reached is whatever the fluid thrust and the drag give.
   constructor(W, H, flow) {
     this.W = W; this.H = H; this.flow = flow;
-    this.count = 7;
+    this.count = 1;
     this.time = 0;
     this.freq = 1;
     this.swimmers = [];
-    this.hold = true;
-    this.rings = [];
     this.setCount(this.count);
   }
 
@@ -59,6 +62,7 @@ export class School {
 
   setCount(n) {
     this.count = n;
+    this.time = 0;
     const lattice = formationLattice(n);
     const iMin = Math.min(...lattice.map(p => p.i)), iMax = Math.max(...lattice.map(p => p.i));
     const jMin = Math.min(...lattice.map(p => p.j)), jMax = Math.max(...lattice.map(p => p.j));
@@ -70,40 +74,48 @@ export class School {
     const L = Math.min(this.H * MAX_LENGTH_FRAC, availW / wUnits, availH / hUnits);
 
     const cy = this.H * 0.44;
-    const left = this.W * 0.53;
+    const left = this.W * START_RIGHT - L - (iMax - iMin) * DX * L;
     const jMid = (jMin + jMax) / 2;
 
-    this.freq = STROUHAL_K * this.flow.inflow / (L * this.flow.cellsPerPx);
+    this.U0 = this.flow.cruise / this.flow.cellsPerPx;     // design swimming speed, px/s
+    this.freq = STROUHAL_K * this.U0 / L;
     this.swimmers = lattice.map(p =>
       new Swimmer(left + (p.i - iMin) * DX * L, cy - (p.j - jMid) * DY * L, L, 0));
-    this.U0 = this.flow.inflow / this.flow.cellsPerPx;
-    this.k0 = meanTailThrust(L, this.freq, this.U0) / (this.U0 * this.U0); // thrust balances drag at U0
-    this.swimmers.forEach(s => { s.localU = this.U0; s.update(0, this.freq); });
+    const cells = this.flow.cellsPerPx;
+    this.mass = bodyArea(L) * cells * cells;               // cells^2 (water density 1, neutral buoyancy)
+    this.drag = CF * L * cells;                            // 1/2 Cf (2 L) in cells
+    this.force = 0;                                        // latest measured streamwise force, cells^3/s^2
+    this.beatSum = 0; this.beatN = 0; this.beatForce = 0; // mean force over the last full beat
+    this.lastBeat = 0;
+    this.swimmers.forEach(s => s.update(0, this.freq));
+  }
+
+  restart() { this.setCount(this.count); }
+
+  // True once every swimmer has left the domain through the left edge.
+  finished() {
+    return this.swimmers.every(s => Math.max(...s.upX, ...s.loX) < 0);
+  }
+
+  // imp = momentum (cells^3/s) the bodies gave the fluid during the previous step (dtPrev seconds).
+  setImpulse(imp, dtPrev) {
+    this.force = dtPrev > 0 ? -imp[0] / dtPrev : 0;
+    this.beatSum += this.force; this.beatN++;
   }
 
   update(dt) {
     this.time += dt;
     this.swimmers.forEach(s => {
-      this.control(s, dt);
-      const f = this.freq * s.ctrl.f;
-      s.update(dt, f);
-      // Lighthill elongated-body theory at the trailing edge (per unit virtual mass),
-      // using the water speed relative to the swimmer.
-      const ur = s.localU - s.vxb;
-      const hd = s.vy[s.n - 1];
-      const w = hd + ur * s.tailSlope;
-      const thrust = hd * w - 0.5 * w * w;
-      const power = ur * hd * w;
-      const a = Math.min(1, dt * f / 2);
-      s.tAvg += (thrust * ur - s.tAvg) * a;
-      s.pAvg += (power - s.pAvg) * a;
-      s.tForce += (thrust - s.tForce) * Math.min(1, dt * f);
-      s.advance(dt, this.k0);
-      this.clamp(s);
+      if (!PIN) s.advanceX(dt, this.force, this.mass, this.drag, this.flow.cellsPerPx);
+      s.update(dt, this.freq);
+      const beat = Math.floor(s.phi / (2 * Math.PI));
+      if (beat > this.lastBeat) {
+        this.lastBeat = beat;
+        this.beatForce = this.beatN ? this.beatSum / this.beatN : 0;
+        this.beatSum = 0; this.beatN = 0;
+      }
     });
-    if (COLLIDE) this.collide(dt);
-    this.rings.forEach(r => { r.age += dt; });
-    this.rings = this.rings.filter(r => r.age < 0.7);
+    if (COLLIDE && this.swimmers.length > 1) this.collide(dt);
   }
 
   // Soft contact between swimmers: overlapping body discs repel with a critically damped spring,
@@ -133,80 +145,27 @@ export class School {
     }
   }
 
-  // Baseline PID hold-station controller: beat frequency for x, heading for y.
-  control(s, dt) {
-    const c = s.ctrl;
-    if (!this.hold) { c.f = 1; c.a = 1; c.psi = 0; s.ix = 0; return; }
-    const L = s.length;
-    s.ix = Math.max(-CTRL.iMax, Math.min(CTRL.iMax, s.ix + s.dx / L * dt));
-    const u = CTRL.kp * s.dx / L + CTRL.kd * s.vxb / this.U0 + CTRL.ki * s.ix;
-    const psi = -(CTRL.kpy * s.dy / L + CTRL.kdy * s.vyb / this.U0);
-    c.psi = Math.max(-PSI_MAX, Math.min(PSI_MAX, psi));
-    c.f = Math.max(CTRL.fMin, Math.min(CTRL.fMax, 1 + u + CTRL.boost * Math.abs(c.psi)));
+  // Mean swimming speed in body lengths per second (positive = forward, i.e. towards the left).
+  speed() {
+    return this.swimmers.reduce((a, s) => a - s.vxb / s.length, 0) / this.swimmers.length;
   }
 
-  clamp(s) {
-    const L = s.length;
-    const minX = this.W * 0.08 - s.homeX, maxX = this.W * 0.97 - L - s.homeX;
-    const minY = this.H * 0.06 - s.homeY, maxY = this.H * 0.80 - s.homeY;
-    if (s.dx < minX || s.dx > maxX) { s.dx = Math.max(minX, Math.min(maxX, s.dx)); s.vxb = 0; }
-    if (s.dy < minY || s.dy > maxY) { s.dy = Math.max(minY, Math.min(maxY, s.dy)); s.vyb = 0; }
-  }
-
-  // Velocity kick (in free-stream speeds) applied to every swimmer.
-  pushAll(ux, uy) {
-    this.swimmers.forEach(s => { s.vxb += ux * this.U0; s.vyb += uy * this.U0; });
-  }
-
-  // Click push: kick swimmers within reach, directed away from the click.
-  pushAt(x, y) {
-    this.rings.push({ x, y, age: 0 });
-    this.swimmers.forEach(s => {
-      const cx = (s.upX[20] + s.loX[20]) / 2, cy = (s.upY[20] + s.loY[20]) / 2;
-      const d = Math.hypot(cx - x, cy - y), reach = PUSH_RADIUS * s.length;
-      if (d > reach) return;
-      const k = PUSH_SPEED * this.U0 * (1 - d / reach) / (d || 1);
-      s.vxb += (cx - x) * k; s.vyb += (cy - y) * k;
-    });
-  }
-
-  // Mean distance from home slot, in body lengths.
-  offset() {
-    return this.swimmers.reduce((a, s) => a + Math.hypot(s.dx, s.dy) / s.length, 0) / this.swimmers.length;
-  }
-
-  // Froude efficiency of each swimmer, and the school average.
-  efficiency() {
-    const etas = this.swimmers.map(s => (s.pAvg > 1e-6 ? Math.max(0, Math.min(1, s.tAvg / s.pAvg)) : 0));
-    return { each: etas, mean: etas.reduce((x, y) => x + y, 0) / etas.length };
-  }
-
-  probePoints() {
-    return this.swimmers.map(s => [s.noseX - 0.25 * s.length, s.noseY]);
-  }
-
-  setLocalFlow(cellsPerS) {
-    const k = 1 / this.flow.cellsPerPx;
-    const a = 0.15;
-    cellsPerS.forEach((u, i) => {
-      const s = this.swimmers[i];
-      if (s) s.localU += (u * k - s.localU) * a;
-    });
-  }
-
-  // One triangle strip per swimmer: [x_ndc, y_ndc, vx, vy] per vertex, velocities in sim cells/s.
+  // One triangle strip per swimmer: [x_ndc, y_ndc, ubx, uby, nx, ny] per vertex. Body velocity in sim
+  // cells/s (y up); n is the unit vector across the body (from lower to upper surface, y up).
   bodyStrips() {
     const sx = 2 / this.W, sy = 2 / this.H, cells = this.flow.cellsPerPx;
     const pad = PAD_CELLS / cells;
     return this.swimmers.map(s => {
-      const d = new Float32Array(s.n * 2 * 4);
+      const d = new Float32Array(s.n * 2 * 6);
       let o = 0;
+      const ubx = s.vxb * cells;
       for (let k = 0; k < s.n; k++) {
-        const vy = -s.vyField[k] * cells;
+        const uby = -s.vyField[k] * cells;
         const dx = s.upX[k] - s.loX[k], dy = s.upY[k] - s.loY[k];
-        const m = pad / (Math.hypot(dx, dy) || 1);
-        d[o++] = (s.upX[k] + dx * m) * sx - 1; d[o++] = 1 - (s.upY[k] + dy * m) * sy; d[o++] = 0; d[o++] = vy;
-        d[o++] = (s.loX[k] - dx * m) * sx - 1; d[o++] = 1 - (s.loY[k] - dy * m) * sy; d[o++] = 0; d[o++] = vy;
+        const len = Math.hypot(dx, dy) || 1;
+        const nx = dx / len, ny = -dy / len, m = pad / len;
+        d.set([(s.upX[k] + dx * m) * sx - 1, 1 - (s.upY[k] + dy * m) * sy, ubx, uby, nx, ny], o); o += 6;
+        d.set([(s.loX[k] - dx * m) * sx - 1, 1 - (s.loY[k] - dy * m) * sy, ubx, uby, nx, ny], o); o += 6;
       }
       return d;
     });
@@ -215,12 +174,5 @@ export class School {
   draw(ctx, darkMode) {
     const fill = darkMode ? '#3A6EA5' : '#14141f';
     this.swimmers.forEach(s => s.draw(ctx, fill));
-    this.rings.forEach(r => {
-      ctx.beginPath();
-      ctx.arc(r.x, r.y, 10 + r.age * 160, 0, 2 * Math.PI);
-      ctx.strokeStyle = darkMode ? `rgba(255,255,255,${0.7 * (1 - r.age / 0.7)})` : `rgba(0,0,0,${0.6 * (1 - r.age / 0.7)})`;
-      ctx.lineWidth = 3;
-      ctx.stroke();
-    });
   }
 }

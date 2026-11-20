@@ -2,111 +2,65 @@
 
 **Live demo → https://ahmedabouhussein.github.io/swimming-school/**
 
-A browser fluid simulation of a school of slender, tuna-shaped swimmers holding station in a current. WebGL2, all compute on the visitor's GPU: no server, no cost. Hard-reload (Cmd/Ctrl+Shift+R) if the page looks stale.
+A browser fluid simulation of a slender, tuna-shaped swimmer that **propels itself through still water**. WebGL2, all compute on the visitor's GPU: no server, no cost. Hard-reload (Cmd/Ctrl+Shift+R) if the page looks stale.
 
-URL options for testing: `?n=12` (swimmer count), `?mode=light`, `?warm=300` (pre-run N solver steps so the wake is already developed), `?sign=1` or the **± Sign** button (colour vortices by rotation direction: red = counter-clockwise, blue = clockwise), `?k=1.25` (tail-beat frequency factor), `?amp=0.10` (tail amplitude, fraction of body length), `?hold=0` (controller off), `?conf=2` (vorticity-confinement strength), `?dt=0.033` (fixed step for the `warm` frames), `?spam=0.7` (stress test: a click every 0.7 s), `?collide=0` (turn swimmer-swimmer contact off), `?push=upstream|downstream|up|down&pushAt=6` (kick every swimmer at that sim time), `?debug=1` (log of swimmer 0's offset, heading, beat-frequency scale, efficiency).
+The swimmer starts at rest on the right, beats its body with fixed kinematics (no control of any kind), and is pushed left only by the reaction force of the water it throws backwards. When it leaves the left edge it restarts from rest in fresh water. Colour = |vorticity|, so you see the wake it leaves behind.
 
-## Key modelling assumption (read this first)
+## How the propulsion works
 
-**The swimmers are only partly "no-slip".** Each body forces the water's *sideways* (y) velocity to match the body's motion, but leaves the *along-stream* (x) velocity alone, so the current slides freely past the body. In other words: no-slip in y, free-slip in x.
+- **Still water**, free-slip top and bottom, open right edge. No imposed current.
+- The body is an **impermeable, frictionless** moving solid: inside its footprint only the velocity component *normal* to the body is forced to the body's velocity (wave motion + streamwise motion); the tangential component is left to the fluid.
+- Each step the solver sums the **momentum this gives the fluid** (before vs after the stamp, both stamps, on the GPU). Newton's third law: the force on the body is minus that, divided by dt. That force, plus drag, accelerates the body along x (`F/m`, mass = body area × water density, i.e. neutrally buoyant).
+- The body moves **only along x** (rectilinear). Sideways force and yaw recoil are measured nowhere and ignored.
+- **Drag is a formula**, not from the grid: `D = ½ Cf (2L) v²` with `Cf = 0.008` (`?cf=`). The grid (body ~4 cells thick) cannot resolve a boundary layer, so the skin friction is imposed. **The terminal speed therefore depends on this chosen Cf**; the thrust is whatever the fluid gives.
 
-Consequences:
+### What it does (headless-Chrome measurements)
 
-- **No body drag.** There is no skin-friction boundary layer along the body, so the simulation says nothing about how much drag a swimmer has. It models thrust and wake interaction only.
-- **Clean thrust wake.** Without a drag boundary layer, the vortices shed from the tail are not hidden, and a solitary swimmer produces a reverse von Kármán street. (`?stamp=full` enforces full no-slip instead, which buries the wake under a drag sheet.)
-- **Same assumption as Lighthill's theory.** This is the same assumption made by Lighthill's elongated-body theory of fish propulsion: a slender body that pushes water sideways, with streamwise friction ignored. That is deliberate, because **efficiency is calculated with Lighthill's theory** (see "Efficiency" below), so the flow model and the efficiency model rest on the same footing.
-- **Full no-slip was tried and rejected.** Stamping x as well (`?stamp=full`) does add an x-force on the body, but at this grid resolution (a body is ~4 cells thick) the numerical drag grows faster than thrust as tail amplitude increases, so net force and a thrust/drag split are not trustworthy and a force-based Froude efficiency could not be resolved. Getting that right would need a much finer body representation; for now efficiency stays Lighthill-based and blind to x-forcing.
-- **Results are only as valid as this assumption.** Conclusions about drag-dependent effects (for example the energetic cost of holding position, or drafting that reduces drag) cannot be drawn from this model.
+Force on the body, averaged over a full beat, with the body pinned in a free stream of speed U (equivalent to swimming at U in still water; thrust is negative = leftward). Cells/s; body length ≈ 75 cells, beat ≈ 0.67 Hz.
 
-## What the flow field is doing
+| U (cells/s) | 0 | 20 | 40 | 90 |
+|---|---|---|---|---|
+| mean force (cells³/s²) | −12,800 | −6,500 | −1,840 | +13,200 |
 
-It is a small virtual wind tunnel:
+Thrust falls with speed and crosses zero near U ≈ 45 cells/s ≈ 0.6 L/s, close to the body-wave speed (λf ≈ 0.67 L/s), as expected physically. Free swimming from rest accelerates for ~5 s and settles at **≈0.57 L/s** (60 fps) / 0.56 L/s (30 fps), where mean thrust ≈ 1,150 balances the drag. The swimmer crosses the domain in ≈12 s and restarts.
 
-- A **steady current** flows left → right at a fixed speed. It enters through the left edge and leaves through the open right edge. The top and bottom are free-slip walls.
-- The swimmers face **upstream** (head left, tail right) and beat their tails just fast enough to hold position. They are moving solid bodies: every frame, each body's shape and lateral velocity are written into the velocity field, then the solver enforces incompressibility.
-- The fluid reacts: **wake vortices are shed** off the tails and carried downstream. That wake is what the colours show.
-- Colour = |vorticity|. Uniform current has zero vorticity, so the left half of the screen is intentionally empty; only disturbances show up.
+Caveats: the grid is coarse, so absolute thrust has some numerical error (earlier full no-slip attempts showed numerical drag growing with amplitude; this free-slip normal-only version avoids the boundary-layer drag but not all grid error). Force is measured from the total impulse, so it is valid for **one swimmer** only. A zero-force null test (static body) is not yet done.
 
-This is the physics the later RL checkpoints will optimise over: a follower's efficiency depends on the wake of the swimmers ahead of it.
-
-### Reverse Kármán street (solitary swimmer)
-
-With one swimmer the wake is a **reverse von Kármán street**: two staggered rows of opposite-sign vortices, counter-clockwise above the centreline and clockwise below, with a jet between them pointing downstream (thrust). Check it with `?n=1&sign=1`. The kinematics sit in the efficient Strouhal band: `St = f·A/U = 1.25 × 0.20 = 0.25` (A = peak-to-peak tail excursion; efficient swimmers sit around 0.2–0.4).
-
-## Efficiency (live readout)
-
-Each swimmer's Froude efficiency `η = (thrust × U) / (power into the water)` is computed from **Lighthill's elongated-body theory** (the same assumption the flow model makes, see above) at the trailing edge, using the swimmer's actual tail velocity and slope and the **flow speed it actually sees**, measured from the fluid 0.25 body lengths ahead of its nose. Thrust and power are averaged over about two tail-beat periods, and the number shown is the simple average of all swimmers. A follower sitting in another swimmer's wake sees a different local flow, so formation changes the number. This is a model estimate from kinematics plus measured flow, not a force integrated over the body in the fluid solver.
-
-## Swimmer state and formula forces (unpinned swimmers)
-
-Swimmers are no longer nailed to their slot. Each has a rigid-body **state** (offset from its home lattice slot, velocity, heading) that is advanced every frame from **formula forces**: closed-form expressions, not forces integrated from the fluid solver (that was tried, see above, and the grid is too coarse to resolve it).
-
-- **Thrust**: Lighthill's trailing-edge thrust per unit virtual mass, `½ḣ² − ½U_rel²·slope²` (time-averaged over a beat), along the body's heading.
-- **Drag**: `k·|u|·u` on the water velocity relative to the body, resolved along and across the body (cross-flow drag is 14× the axial one, so sideways motion is heavily damped). `k` is calibrated once so thrust exactly balances drag at the free-stream speed with the default kinematics.
-- **Water speed** `U_rel = local flow − swimmer velocity`, where the local flow is probed from the fluid 0.25 L ahead of the nose. This is how the fluid enters the dynamics: a follower in a wake feels a different drag and thrust.
-- **Heading** follows a command like a damped spring (about a 1.5 s response); the body rotates about 35% of its length from the nose.
-- **Back into the fluid**: the body's lateral motion (wave + rigid sway + rotation) is stamped into the water as before, so a moving swimmer still sheds a wake. Streamwise motion does not push water (the key modelling assumption above).
-- **Efficiency** is still Lighthill, but now uses the swimmer's actual `U_rel` and kinematics, so it changes when a swimmer beats harder, coasts, or sits in a wake. At very low beat frequency thrust goes negative and the readout clamps to 0%.
-
-### Baseline controller and push
-
-A hand-tuned PID keeps each swimmer in its slot: beat-frequency scale (kept between 0.7 and 1.6 so swimmers never stop beating) for the streamwise error, heading command for the sideways error (the "Hold" button turns it off, so swimmers drift). **Click the water** to push swimmers away from the click (a velocity kick, not a stamped ball), or use `?push=`. Typical recovery is about 10 s; the "Offset" readout is the mean distance from slot in body lengths, and efficiency dips while swimmers coast or sprint back. This controller is the benchmark the RL policies will have to beat; those actions will be beat-frequency scale, amplitude scale and heading command, with reward based on distance from slot (plus efficiency).
-
-### Collisions
-
-Swimmers cannot pass through each other. Each body carries 11 contact discs along its actual (waving, rotated) centreline, radius = local half-thickness + 0.018 L. Any overlapping pair of discs from two swimmers gets a critically damped spring-damper push along the line between centres (stiffness about 40 U0/L rad/s, no attraction), applied equally and oppositely to the two bodies' velocities. It costs a few thousand distance checks per frame at 20 swimmers (bounding-box rejected), negligible next to the fluid solve. Verified fluid-free over a minute of repeated clicks at 30, 60 and 120 fps: with contact, body centrelines never cross; without it they cross for thousands of frames (even with the controller on at 12 swimmers). Limits: contact acts on translation only (no torque, so a glancing hit does not spin a swimmer; heading is still its commanded value); contacts are soft, so a hard squeeze (e.g. a pile against a wall) overlaps by a few percent of a body length; the water does not feel contact beyond the stamped body positions.
-
-### Stability note (what went wrong once)
-
-After swimmers were unpinned, repeated clicks turned the flow chaotic (speckled debris, comb of tiny vortices, swimmers scattered). Root cause, found by bisection: vorticity-confinement strength 6 was too high. It re-amplifies any strong shear into small vortices, which was tolerable only while the wake was steady. Rigid-body swimmer state was **not** the cause (it stays bounded at 30, 60 and 120 fps; dropping the rotation term from the stamp did not help), and the earlier "random upstream vortices" were the same mechanism. Strength 2 gives crisp, coherent vortices undisturbed (50 s) and under a click every 0.7 s (`?spam=0.7`). Repeated clicks still displace swimmers, because the baseline needs about 10 s to recover; that is expected, not an instability.
-
-## Formation
-
-Swimmers sit on a harlequin (repeating-diamond) lattice. One diamond = front swimmer, two side swimmers, and a back swimmer directly behind the front one (same height, horizontal offset only):
-
-```
- 1 . 4        diamond 1 = swimmers 1,2,3,4
-  2 3         (1 front, 2/3 sides, 4 directly behind 1)
-```
-
-Further diamonds are added in the same order as the first swimmers were: one to the side, the other side, then behind, and so on, sharing vertices with their neighbours (so diamond 2 adds 3 swimmers, etc.). The school lives in the right half of the domain (its left edge sits at 53% of the width, so small schools leave room for their wake), at constant size until it no longer fits, then shrinks uniformly.
+URL options: `?mode=light`, `?sign=1` (red = counter-clockwise, blue = clockwise), `?warm=300` (pre-run N steps), `?dt=0.033` (step for warm frames), `?debug=1` (time, position, speed, last-beat mean force), `?cf=0.008` (drag coefficient), `?pin=1` (hold the body still; with `?flow=U` gives the force-vs-speed curve), `?flow=U` (free-stream, cells/s; default 0), `?k=1.25` (beat frequency factor, f = K·U₀/L), `?amp=0.10` (tail amplitude / L), `?conf=2` (vorticity confinement).
 
 ## Swimmer
 
-A closed slender envelope (about 9:1 length:max-thickness, rounded nose, tapering tail, no sharp points). A carangiform wave travels head → tail with amplitude growing from 2% to 10% of body length. Tail-beat frequency is set from the current speed (Strouhal-like: `f = 1.25 U / L`) so the swimmers hold station.
+Closed slender envelope (~9:1 length:thickness, no sharp points). A carangiform wave travels head → tail, amplitude 2% → 10% of body length, wavelength = one body length. Beat frequency uses a reference speed U₀ = 40 cells/s (`f = 1.25 U₀/L`, Strouhal ≈ 0.25); it is fixed, so the swimmer's actual speed is a result, not an input.
 
 ## Solver (`src/fluid.js`)
 
-Stam stable-fluids on a 288-cell-high grid (aspect-matched, ~512 wide), in GLSL fragment shaders:
+Stam stable-fluids on a 288-cell-high grid (~512 wide), GLSL fragment shaders:
 
-1. Semi-Lagrangian advection (stored field = perturbation from the free stream, so half-float precision stays good)
-2. Vorticity confinement (strength 2), gated so it only acts where |vorticity| is already significant. Strength matters: at 6 it shredded wakes into speckle and made the flow chaotic under disturbance (see below); 0 gives smooth but blurry vortices
-3. Body stamping: only the body's **lateral** velocity is written into the field; streamwise flow passes freely (see the key modelling assumption above)
-4. Divergence → 40 Jacobi pressure iterations (open outlet = pressure 0) → gradient subtraction
-5. Bodies stamped again so the next advection sees them
+1. Semi-Lagrangian advection (stored field = perturbation from the free stream)
+2. Vorticity confinement (ε = 2, gated on |ω|). ε = 6 shredded wakes into noise; see the tag below
+3. Body map drawn (velocity + normal), normal-only constraint applied, momentum change reduced to a number (8×8 blocks → sum → `readPixels`)
+4. Divergence → 40 Jacobi pressure iterations (open outlet p = 0) → gradient subtraction
+5. Constraint applied again (this is the second impulse term), then curl for display
 
 Needs WebGL2 + `EXT_color_buffer_float`.
 
 ## Rendering
 
-Two stacked canvases: WebGL for vorticity, 2D canvas for swimmers.
-
-| Mode | Water | Vortices | Swimmers |
-|------|-------|----------|----------|
+| Mode | Water | Vortices | Swimmer |
+|------|-------|----------|---------|
 | Dark | black | green | steel blue `#3A6EA5` |
 | Light | white | light red | solid dark |
 
 ## Files
 
-`index.html` UI · `src/main.js` loop/UI · `src/fluid.js` solver · `src/school.js` formation + coupling data · `src/swimmer.js` body shape and kinematics. Hosted as static files on GitHub Pages; module URLs carry `?v=N` to dodge Pages caching.
+`index.html` UI · `src/main.js` loop/UI · `src/fluid.js` solver + force measurement · `src/school.js` placement, force → motion, restart (diamond-lattice and contact code kept dormant for later) · `src/swimmer.js` body shape and kinematics. Static files on GitHub Pages; module URLs carry `?v=N` to dodge caching.
 
-## Roadmap
+## History and roadmap
 
-| Tag | Checkpoint |
-|-----|-----------|
-| `v1.x` | Real fluid, fixed kinematics, fixed diamond formation |
-| `v2.0` ← *current* | Unpinned swimmers: state, formula forces, baseline hold-station controller, push |
-| `v3.0` | Individual RL: each swimmer optimises its own kinematics |
-| `v4.0` | Group RL: collective efficiency vs individual optimisation, spacing |
+Tag `station-keeping-v11` is the previous design: swimmers held station in an imposed current using *formula* thrust (Lighthill) and a PID controller, with lateral-only stamping, collisions and diamond schools. That was not self-propulsion, so it was set aside.
 
-Known limits: the water pushes swimmers only through the probed flow speed (no pressure force on the body, no sideways flow component in the drag); controller gains and the mass/drag constants are tuned for plausible behaviour, not calibrated to real tuna; efficiency is a Lighthill-theory estimate, not integrated CFD force; with the open right edge only about three wake wavelengths are visible.
+| Step | Status |
+|------|--------|
+| Solitary self-propulsion, fixed kinematics, still water | **current** |
+| Diamond school (1–20) swimming in still water | next |
+| Individual RL (kinematics, spacing) → group RL | later |

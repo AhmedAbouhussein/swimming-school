@@ -1,5 +1,5 @@
-import { createFluidSolver } from './fluid.js?v=11';
-import { School } from './school.js?v=11';
+import { createFluidSolver } from './fluid.js?v=13';
+import { School } from './school.js?v=13';
 
 function showError(msg) {
   const el = document.createElement('pre');
@@ -10,6 +10,8 @@ function showError(msg) {
 window.addEventListener('error', e => showError(`JS Error: ${e.message}\n${e.filename}:${e.lineno}`));
 window.addEventListener('unhandledrejection', e => showError(`Unhandled: ${e.reason}`));
 
+const CRUISE = 40;   // reference speed, sim cells/s: sets the beat frequency (f = K U / L)
+
 const params = new URLSearchParams(location.search);
 const container  = document.getElementById('canvas-container');
 const glCanvas   = document.getElementById('gl-canvas');
@@ -17,20 +19,13 @@ const overlay    = document.getElementById('overlay-canvas');
 const slider     = document.getElementById('slider');
 const countLabel = document.getElementById('count');
 const modeBtn    = document.getElementById('mode-btn');
-const effLabel   = document.getElementById('eff');
 const signBtn    = document.getElementById('sign-btn');
-const holdBtn    = document.getElementById('hold-btn');
-const errLabel   = document.getElementById('err');
+const speedLabel = document.getElementById('speed');
 const debugEl    = document.getElementById('debug');
 let frameNo = 0;
 
 let darkMode = params.get('mode') !== 'light';
 let signMode = params.get('sign') === '1';
-let hold = params.get('hold') !== '0';
-const pushDirs = { upstream: [-1, 0], downstream: [1, 0], up: [0, -1], down: [0, 1] };
-const pushDir = pushDirs[params.get('push')];
-const pushAt = parseFloat(params.get('pushAt') || '6');
-let pushed = false;
 const log = [];
 if (params.get('debug')) debugEl.hidden = false;
 let gl, fluid, school, ctx2d;
@@ -62,11 +57,6 @@ function applySize(W, H) {
   }
 }
 
-function applyHold() {
-  school.hold = hold;
-  holdBtn.classList.toggle('on', hold);
-}
-
 function applyMode() {
   signBtn.classList.toggle('on', signMode);
   modeBtn.textContent = darkMode ? '☀ Light' : '☾ Dark';
@@ -74,7 +64,7 @@ function applyMode() {
 }
 
 function flowOf(W) {
-  return { inflow: fluid.inflow, cellsPerPx: fluid.simW / W };
+  return { cruise: CRUISE, cellsPerPx: fluid.simW / W };
 }
 
 function build() {
@@ -87,7 +77,6 @@ function build() {
     school = new School(W, H, flowOf(W));
     school.setCount(parseInt(slider.value));
   }
-  school.hold = hold;
 }
 
 function init() {
@@ -96,7 +85,6 @@ function init() {
   ctx2d = overlay.getContext('2d');
   try { build(); } catch (e) { showError(`Fluid solver failed: ${e.message}`); }
   applyMode();
-  applyHold();
   const warm = parseInt(params.get('warm') || '0');
   const warmDt = parseFloat(params.get('dt') || String(1 / 60));
   for (let i = 0; i < warm && fluid; i++) tick(warmDt);
@@ -112,6 +100,7 @@ slider.addEventListener('input', () => {
   const n = parseInt(slider.value);
   countLabel.textContent = n;
   school?.setCount(n);
+  fluid?.clear();
 });
 
 signBtn.addEventListener('click', () => {
@@ -120,41 +109,24 @@ signBtn.addEventListener('click', () => {
   signBtn.classList.toggle('on', signMode);
 });
 
-holdBtn.addEventListener('click', () => {
-  hold = !hold;
-  applyHold();
-});
-
-container.addEventListener('click', e => {
-  if (!school || e.target.closest('#ui')) return;
-  const r = container.getBoundingClientRect();
-  school.pushAt(e.clientX - r.left, e.clientY - r.top);
-});
-
 modeBtn.addEventListener('click', () => {
   darkMode = !darkMode;
   applyMode();
 });
 
-const spam = parseFloat(params.get('spam') || '0');
-let spamNext = 3, spamI = 0;
 function tick(dt) {
-  if (spam && school.time >= spamNext) { spamNext += spam; const a = spamI++ * 2.4; school.pushAt(school.W * (0.62 + 0.12 * Math.cos(a)), school.H * (0.44 + 0.15 * Math.sin(a * 1.7))); }
-  if (pushDir && !pushed && school.time >= pushAt) { pushed = true; school.pushAll(pushDir[0] * 0.5, pushDir[1] * 0.5); }
   school.update(dt);
   fluid.step(dt, school.bodyStrips());
-  if (frameNo++ % 4 === 0) school.setLocalFlow(fluid.probe(school.probePoints()));
-  if (frameNo % 10 === 0) {
-    const eff = school.efficiency().mean, off = school.offset();
-    effLabel.textContent = Math.round(eff * 100) + '%';
-    errLabel.textContent = off.toFixed(2) + ' L';
-    if (!debugEl.hidden && frameNo % 30 === 0) {
-      const s = school.swimmers[0], L = s.length;
-      log.push(`t=${school.time.toFixed(1).padStart(5)} dx=${(s.dx / L).toFixed(2)} dy=${(s.dy / L).toFixed(2)} psi=${s.psi.toFixed(2)} f=${s.ctrl.f.toFixed(2)} eta=${Math.round(eff * 100)}% off=${off.toFixed(2)}`);
-      if (log.length > 40) log.shift();
-      debugEl.textContent = log.join('\n');
-    }
+  school.setImpulse(fluid.impulse(), dt);
+  frameNo++;
+  if (frameNo % 10 === 0) speedLabel.textContent = school.speed().toFixed(2) + ' L/s';
+  if (!debugEl.hidden && frameNo % 30 === 0) {
+    const s = school.swimmers[0];
+    log.push(`t=${school.time.toFixed(1).padStart(5)} x=${(s.noseX / school.W).toFixed(2)}W speed=${school.speed().toFixed(3)}L/s beatF=${school.beatForce.toFixed(1)}`);
+    if (log.length > 40) log.shift();
+    debugEl.textContent = log.join('\n');
   }
+  if (school.finished()) { school.restart(); fluid.clear(); }
 }
 
 function frame(ts) {
